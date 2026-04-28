@@ -28,7 +28,7 @@ SEED        = 42
 
 torch.manual_seed(SEED)
 os.makedirs(MODEL_DIR, exist_ok=True)
-DEVICE = torch.device("cpu")
+DEVICE = torch.device("cuda")
 print(f"Entraînement sur : {DEVICE}")
 
 
