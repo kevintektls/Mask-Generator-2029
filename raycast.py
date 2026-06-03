@@ -1,185 +1,119 @@
 import numpy as np
-import cv2
-import math
+from PIL import Image, ImageDraw
+import torch
+import time
 
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+NUM_RAYS   = 32       # nombre de rayons (modulable)
+FOV_DEG    = 180      # champ de vision en degrés
+MAX_DIST   = 1.0      # distance max normalisée (1.0 = diagonale de l'image)
+THRESHOLD  = 0.5      # seuil de détection sur le masque
+# ─────────────────────────────────────────────────────────────────────────────
 
-def raycast(mask: np.ndarray, n_rays: int = 9, fov: int = 120) -> list[float]:
+def raycast(mask_np: np.ndarray, num_rays: int = NUM_RAYS, fov_deg: float = FOV_DEG):
     """
-    Lance n_rays rayons depuis le bas-centre du masque binaire.
-
-    Chaque rayon part dans une direction différente dans le champ de vision (fov).
-    Il avance pixel par pixel jusqu'à toucher un pixel blanc (une ligne de piste).
-    Il retourne la distance normalisée entre 0.0 et 1.0
-    (1.0 = rien trouvé / rayon sorti de l'image).
-
+    Lance num_rays rayons depuis le centre bas du masque.
+    
     Args:
-        mask    : image binaire numpy (uint8), blanc = ligne, noir = fond
-        n_rays  : nombre de rayons à lancer
-        fov     : champ de vision total en degrés (ex: 120° = 60° à gauche, 60° à droite)
-
+        mask_np : masque binaire numpy (H, W), valeurs 0.0 ou 1.0
+        num_rays : nombre de rayons
+        fov_deg  : champ de vision total en degrés
+    
     Returns:
-        Liste de n_rays distances normalisées (float entre 0.0 et 1.0)
+        distances : array (num_rays,) — distance normalisée [0, 1] jusqu'à
+                    la première ligne détectée, 1.0 si rien détecté
+        angles_deg : array (num_rays,) — angle de chaque rayon en degrés
     """
-    height, width = mask.shape
+    H, W = mask_np.shape
+    diag = np.sqrt(H**2 + W**2)
 
-    # Point de départ : bas-centre de l'image
-    origin_x = width // 2
-    origin_y = height - 1
+    # Point d'origine : centre bas
+    ox, oy = W / 2, H - 1
 
-    # Distance max possible dans l'image (diagonale), sert à normaliser
-    max_dist = math.sqrt(width**2 + height**2)
+    # Angles des rayons : de -90° (gauche) à +90° (droite)
+    # 0° = tout droit vers le haut (devant la voiture)
+    half_fov = fov_deg / 2
+    angles_deg = np.linspace(-half_fov, half_fov, num_rays)
 
-    # On calcule les angles de chaque rayon
-    # Les angles sont répartis uniformément dans le fov
-    # 90° = vers le haut (devant la voiture), 0° = droite, 180° = gauche
-    # On part de (90 - fov/2) jusqu'à (90 + fov/2)
-    if n_rays == 1:
-        angles = [90.0]
-    else:
-        angle_start = 90 - fov / 2
-        angle_end = 90 + fov / 2
-        angles = [
-            angle_start + i * (fov / (n_rays - 1))
-            for i in range(n_rays)
-        ]
+    # Convertit en radians, ajuste : 0° = vers le haut = -π/2 en coords image
+    angles_rad = np.deg2rad(angles_deg - 90)
 
-    distances = []
+    distances = np.ones(num_rays)  # par défaut : rien détecté = 1.0
 
-    for angle_deg in angles:
-        # Conversion angle → direction (dx, dy)
-        # En trigonométrie standard : x = cos(angle), y = sin(angle)
-        # Mais en image, l'axe Y est inversé (0 en haut, max en bas)
-        # Donc dy est négatif pour aller vers le haut
-        angle_rad = math.radians(angle_deg)
-        dx = math.cos(angle_rad)
-        dy = -math.sin(angle_rad)   # négatif car Y image = vers le bas
+    for i, angle in enumerate(angles_rad):
+        dx = np.cos(angle)
+        dy = np.sin(angle)
 
-        # On avance pixel par pixel le long du rayon
-        dist = 0.0
-        found = False
-
-        # Longueur max du rayon = diagonale de l'image (on ne peut pas aller plus loin)
-        max_steps = int(max_dist) + 1
-
+        # Marche pixel par pixel le long du rayon
+        # Nombre max de steps = diagonale de l'image
+        max_steps = int(diag)
         for step in range(1, max_steps):
-            # Position actuelle du rayon
-            px = int(round(origin_x + dx * step))
-            py = int(round(origin_y + dy * step))
+            x = int(ox + dx * step)
+            y = int(oy + dy * step)
 
-            # Si on sort de l'image → on arrête
-            if px < 0 or px >= width or py < 0 or py >= height:
-                dist = max_dist
+            # Sort de l'image → rayon bloqué
+            if x < 0 or x >= W or y < 0 or y >= H:
+                distances[i] = step / diag
                 break
 
-            # Si on touche un pixel blanc (ligne de piste) → on enregistre la distance
-            if mask[py, px] > 0:
-                dist = math.sqrt((px - origin_x)**2 + (py - origin_y)**2)
-                found = True
-                break
-        else:
-            # On a parcouru tous les steps sans rien trouver
-            dist = max_dist
-
-        # Normalisation : distance entre 0.0 et 1.0
-        distances.append(dist / max_dist)
-
-    return distances
-
-
-def visualize(image: np.ndarray, mask: np.ndarray, n_rays: int = 9, fov: int = 120) -> np.ndarray:
-    """
-    Dessine les rayons sur l'image originale pour visualiser le résultat.
-
-    - Rayon VERT  → a touché une ligne (distance < 1.0)
-    - Rayon ROUGE → n'a rien trouvé (sorti de l'image)
-    - Point JAUNE → point de contact avec la ligne
-
-    Args:
-        image   : image BGR originale (pour l'affichage)
-        mask    : masque binaire correspondant
-        n_rays  : nombre de rayons
-        fov     : champ de vision en degrés
-
-    Returns:
-        Image BGR avec les rayons dessinés dessus
-    """
-    height, width = mask.shape
-    max_dist = math.sqrt(width**2 + height**2)
-
-    origin_x = width // 2
-    origin_y = height - 1
-
-    if n_rays == 1:
-        angles = [90.0]
-    else:
-        angle_start = 90 - fov / 2
-        angle_end = 90 + fov / 2
-        angles = [
-            angle_start + i * (fov / (n_rays - 1))
-            for i in range(n_rays)
-        ]
-
-    # Copie de l'image pour ne pas modifier l'original
-    output = image.copy()
-
-    # Si l'image est en niveaux de gris, on la convertit en BGR pour afficher des couleurs
-    if len(output.shape) == 2:
-        output = cv2.cvtColor(output, cv2.COLOR_GRAY2BGR)
-
-    for angle_deg in angles:
-        angle_rad = math.radians(angle_deg)
-        dx = math.cos(angle_rad)
-        dy = -math.sin(angle_rad)
-
-        max_steps = int(max_dist) + 1
-        hit_x, hit_y = None, None
-
-        for step in range(1, max_steps):
-            px = int(round(origin_x + dx * step))
-            py = int(round(origin_y + dy * step))
-
-            if px < 0 or px >= width or py < 0 or py >= height:
-                # Rayon sorti → on dessine jusqu'au bord en rouge
-                end_x = int(round(origin_x + dx * (step - 1)))
-                end_y = int(round(origin_y + dy * (step - 1)))
-                cv2.line(output, (origin_x, origin_y), (end_x, end_y), (0, 0, 255), 1)
+            # Ligne détectée
+            if mask_np[y, x] >= THRESHOLD:
+                distances[i] = step / diag
                 break
 
-            if mask[py, px] > 0:
-                hit_x, hit_y = px, py
-                # Rayon qui touche → on dessine en vert jusqu'au point de contact
-                cv2.line(output, (origin_x, origin_y), (hit_x, hit_y), (0, 255, 0), 1)
-                # Point de contact en jaune
-                cv2.circle(output, (hit_x, hit_y), 3, (0, 255, 255), -1)
-                break
-
-    # Point d'origine en blanc
-    cv2.circle(output, (origin_x, origin_y), 5, (255, 255, 255), -1)
-
-    return output
+    return distances, angles_deg
 
 
-# --- TEST RAPIDE ---
-# Lance ce fichier directement pour tester avec un masque synthétique
+def visualize_raycast(image_path, mask_np, distances, angles_deg, save_path="raycast_viz.png"):
+    """Superpose les rayons sur l'image originale pour vérification visuelle."""
+    img = Image.open(image_path).convert("RGB").resize((mask_np.shape[1], mask_np.shape[0]))
+    draw = ImageDraw.Draw(img)
+
+    H, W = mask_np.shape
+    diag = np.sqrt(H**2 + W**2)
+    ox, oy = W / 2, H - 1
+
+    angles_rad = np.deg2rad(angles_deg - 90)
+
+    for i, (angle, dist) in enumerate(zip(angles_rad, distances)):
+        dx = np.cos(angle)
+        dy = np.sin(angle)
+        length = dist * diag
+
+        ex = ox + dx * length
+        ey = oy + dy * length
+
+        # Rouge si ligne détectée, vert si bord image
+        color = (255, 0, 0) if dist < 1.0 else (0, 255, 0)
+        draw.line([(ox, oy), (ex, ey)], fill=color, width=1)
+
+    img.save(save_path)
+    print(f"Visualisation sauvegardée : {save_path}")
+
+
 if __name__ == "__main__":
+    # ── Test sur un masque réel ───────────────────────────────────────────────
+    import os
 
-    # Crée un masque de test : image noire avec deux lignes diagonales blanches
-    mask = np.zeros((240, 320), dtype=np.uint8)
+    # Prend le premier masque du dataset
+    mask_dir = "dataset_final/masks"
+    img_dir  = "dataset_final/images"
+    fname    = sorted(os.listdir(mask_dir))[0]
 
-    # Ligne gauche (diagonale)
-    cv2.line(mask, (80, 240), (120, 100), 255, 3)
-    # Ligne droite (diagonale)
-    cv2.line(mask, (240, 240), (200, 100), 255, 3)
+    mask = Image.open(os.path.join(mask_dir, fname)).convert("L").resize((256, 256))
+    mask_np = np.array(mask, dtype=np.float32) / 255.0
 
-    # Lance le raycast
-    distances = raycast(mask, n_rays=9, fov=120)
-
-    print("Distances normalisées par rayon :")
-    for i, d in enumerate(distances):
-        status = "TOUCHÉ" if d < 1.0 else "rien"
-        print(f"  Rayon {i+1:2d} : {d:.3f}  ({status})")
+    # Benchmark
+    t0 = time.time()
+    for _ in range(100):
+        distances, angles = raycast(mask_np, num_rays=32)
+    elapsed = (time.time() - t0) / 100 * 1000
+    print(f"Raycast 32 rayons : {elapsed:.2f} ms en moyenne")
 
     # Visualisation
-    result = visualize(mask, mask, n_rays=9, fov=120)
-    cv2.imwrite("raycast_test.png", result)
-    print("\nImage sauvegardée : raycast_test.png")
+    visualize_raycast(os.path.join(img_dir, fname), mask_np, distances, angles)
+
+    print(f"\nDistances (32 rayons) :")
+    for a, d in zip(angles, distances):
+        bar = "█" * int(d * 20)
+        print(f"  {a:+6.1f}° | {d:.3f} | {bar}")
