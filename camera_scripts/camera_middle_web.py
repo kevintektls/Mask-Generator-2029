@@ -96,7 +96,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
             html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>OAK-D Lite — Center Camera</title>
+    <title>Center Camera</title>
     <style>
         body {{
             margin: 0;
@@ -131,7 +131,7 @@ def start_mjpeg_server(port: int = PORT):
     server = socketserver.ThreadingTCPServer(("0.0.0.0", port), MJPEGHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    print(f"\n🚀 MJPEG stream launched!")
+    print(f"\nMJPEG stream launched!")
     print(f"👉 Dashboard:    http://localhost:{port}/")
     print(f"👉 Direct stream: http://localhost:{port}/stream\n")
     return server
@@ -216,8 +216,6 @@ def main():
                 pkt = q.tryGet()
                 if pkt is not None:
                     frame = pkt.getCvFrame()  # BGR from the color cam
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # → grayscale
-                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)  # 3-ch for JPEG
                     frame = resize_to_preview(frame)
                     frame = draw_fps(frame, tick())
                     _update_stream(frame)
