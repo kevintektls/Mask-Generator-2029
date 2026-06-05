@@ -612,6 +612,15 @@ def _cap_resolution(
 NATIVE_MONO_SIZE = (640, 480)
 
 
+def _stereo_preset():
+    """Pick a StereoDepth preset available in the installed DepthAI version."""
+    presets = dai.node.StereoDepth.PresetMode
+    for name in ("DEFAULT", "HIGH_DENSITY", "ROBOTICS", "HIGH_ACCURACY"):
+        if hasattr(presets, name):
+            return getattr(presets, name)
+    raise RuntimeError("No compatible StereoDepth PresetMode found")
+
+
 def build_pipeline(
     preview_size: tuple[int, int], stream_fps: int, enable_depth: bool
 ):
@@ -653,7 +662,7 @@ def build_pipeline(
 
     if enable_depth:
         stereo = pipeline.create(dai.node.StereoDepth)
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
+        stereo.setDefaultProfilePreset(_stereo_preset())
         stereo.setLeftRightCheck(True)
         stereo.setSubpixel(False)
         stereo.setExtendedDisparity(False)
