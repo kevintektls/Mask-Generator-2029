@@ -24,6 +24,7 @@ except ImportError:
 MODEL_PATH = Path("../model/unet_scripted.pt")
 PREVIEW_SIZE = (640, 480)
 FPS = 30
+MODEL_INPUT_SIZE = (347, 256)  # (width, height) - exact size expected by model
 
 # Charge modèle
 print(f"Loading U-Net from {MODEL_PATH}...")
@@ -31,9 +32,8 @@ model = torch.jit.load(str(MODEL_PATH))
 model.eval()
 print("✓ Model loaded\n")
 
-# Transforms U-Net (347x256)
+# Transforms U-Net - exact size without Resize conflicts
 transform = transforms.Compose([
-    transforms.Resize((256, 347)),
     transforms.ToTensor(),
 ])
 
@@ -84,7 +84,8 @@ def main():
             frame_rgb = cv2.resize(frame_rgb, PREVIEW_SIZE)
             
             # Inférence U-Net
-            frame_resized = cv2.resize(frame, (347, 256))
+            # Redimensionne exactement à (347, 256) sans double resize
+            frame_resized = cv2.resize(frame, MODEL_INPUT_SIZE)
             frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_GRAY2RGB)
             frame_pil = Image.fromarray(frame_rgb)
             tensor = transform(frame_pil).unsqueeze(0)
