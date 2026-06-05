@@ -42,6 +42,7 @@ FPS = int(sys.argv[1])
 DEPTH_MAX_MM = 8_000  # Initial max depth shown (mm)
 SNAPSHOT_DIR = Path("snapshots")
 PORT = 8080
+RECONNECT_DELAY_S = 2.0
 
 COLORMAPS = [cv2.COLORMAP_TURBO, cv2.COLORMAP_BONE, cv2.COLORMAP_HSV]
 COLORMAP_NAMES = ["TURBO", "BONE", "HSV"]
@@ -131,7 +132,7 @@ def build_pipeline():
 
     # ── Left mono ──────────────────────────────────────────────────────────
     cam_left = pipeline.create(dai.node.MonoCamera)
-    cam_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+    cam_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     cam_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
     cam_left.setFps(FPS)
 
@@ -144,7 +145,7 @@ def build_pipeline():
 
     # ── Right mono ─────────────────────────────────────────────────────────
     cam_right = pipeline.create(dai.node.MonoCamera)
-    cam_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+    cam_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     cam_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
     cam_right.setFps(FPS)
 
@@ -157,7 +158,7 @@ def build_pipeline():
 
     # ── Stereo depth ───────────────────────────────────────────────────────
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.DEFAULT)
     stereo.setLeftRightCheck(True)
     stereo.setSubpixel(False)
     stereo.setOutputSize(*PREVIEW_SIZE)
@@ -197,13 +198,101 @@ def resize_to_preview(frame: np.ndarray) -> np.ndarray:
     return frame
 
 
+def placeholder_frame(label: str, message: str) -> np.ndarray:
+    frame = np.zeros((PREVIEW_SIZE[1], PREVIEW_SIZE[0], 3), dtype=np.uint8)
+    cv2.putText(
+        frame, label, (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+    )
+    cv2.putText(
+        frame, message, (8, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 180, 255), 1
+    )
+    return frame
+
+
+def show_reconnecting_streams():
+    msg = "Reconnecting to device..."
+    for name in ("LEFT", "RIGHT", "DEPTH"):
+        _update_stream(name, placeholder_frame(name, msg))
+
+
+def safe_try_get(queue):
+    try:
+        return queue.tryGet()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Queue read failed: {e}") from e
+
+
+def stream_from_device(device, fps_data, colormap_idx, depth_max):
+    q_left = device.getOutputQueue(name="left", maxSize=4, blocking=False)
+    q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
+    q_depth = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+
+    latest = {k: None for k in ("left", "right", "depth")}
+
+    while True:
+        for name, q in (
+            ("left", q_left),
+            ("right", q_right),
+            ("depth", q_depth),
+        ):
+            pkt = safe_try_get(q)
+            if pkt is not None:
+                latest[name] = pkt
+                tick_fps(fps_data, name)
+
+        if latest["left"] is not None:
+            f = latest["left"].getCvFrame()
+            f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+            f = resize_to_preview(f)
+            f = draw_fps(f, fps_data["left"]["fps"], "LEFT")
+            _update_stream("LEFT", f)
+
+        if latest["right"] is not None:
+            f = latest["right"].getCvFrame()
+            f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+            f = resize_to_preview(f)
+            f = draw_fps(f, fps_data["right"]["fps"], "RIGHT")
+            _update_stream("RIGHT", f)
+
+        if latest["depth"] is not None:
+            raw = latest["depth"].getFrame()
+            f = colorize_depth(raw, COLORMAPS[colormap_idx], depth_max)
+            f = resize_to_preview(f)
+            lbl = f"DEPTH [{COLORMAP_NAMES[colormap_idx]}] max={depth_max // 1000}m"
+            f = draw_fps(f, fps_data["depth"]["fps"], lbl)
+            _update_stream("DEPTH", f)
+
+        time.sleep(0.001)
+
+
+def tick_fps(fps_data, name: str) -> float:
+    d = fps_data[name]
+    d["count"] += 1
+    now = time.monotonic()
+    if now - d["t"] >= 1.0:
+        d["fps"] = d["count"] / (now - d["t"])
+        d["count"] = 0
+        d["t"] = now
+    return d["fps"]
+
+
+def connect_and_stream(fps_data, colormap_idx, depth_max):
+    print("Building DepthAI v2.29 pipeline …")
+    pipeline = build_pipeline()
+    print("Starting pipeline …")
+
+    with dai.Device(pipeline) as device:
+        print("🔌 Vitesse USB détectée :", device.getUsbSpeed())
+        print("Connected! Streaming online. Press Ctrl+C in terminal to stop.")
+        stream_from_device(device, fps_data, colormap_idx, depth_max)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
 def main():
-    print("Building DepthAI v2.29 pipeline …")
-    pipeline = build_pipeline()
-
     colormap_idx = 0
     depth_max = DEPTH_MAX_MM
 
@@ -212,71 +301,24 @@ def main():
         for name in ("left", "right", "depth")
     }
 
-    def tick(name: str) -> float:
-        d = fps_data[name]
-        d["count"] += 1
-        now = time.monotonic()
-        if now - d["t"] >= 1.0:
-            d["fps"] = d["count"] / (now - d["t"])
-            d["count"] = 0
-            d["t"] = now
-        return d["fps"]
-
-    # Spin up the background webserver
     start_mjpeg_server(port=PORT)
 
-    print("Starting pipeline …")
-
-    try:
-        with dai.Device(pipeline) as device:
-            print("🔌 Vitesse USB détectée :", device.getUsbSpeed())
-            q_left = device.getOutputQueue(name="left", maxSize=4, blocking=False)
-            q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
-            q_depth = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
-
-            print("Connected! Streaming online. Press Ctrl+C in terminal to stop.")
-
-            latest = {k: None for k in ("left", "right", "depth")}
-
-            while True:
-                # Grab latest frames (non-blocking)
-                for name, q in (
-                    ("left", q_left),
-                    ("right", q_right),
-                    ("depth", q_depth),
-                ):
-                    pkt = q.tryGet()
-                    if pkt is not None:
-                        latest[name] = pkt
-                        tick(name)
-
-                if latest["left"] is not None:
-                    f = latest["left"].getCvFrame()
-                    f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
-                    f = resize_to_preview(f)
-                    f = draw_fps(f, fps_data["left"]["fps"], "LEFT")
-                    _update_stream("LEFT", f)
-
-                if latest["right"] is not None:
-                    f = latest["right"].getCvFrame()
-                    f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
-                    f = resize_to_preview(f)
-                    f = draw_fps(f, fps_data["right"]["fps"], "RIGHT")
-                    _update_stream("RIGHT", f)
-
-                if latest["depth"] is not None:
-                    raw = latest["depth"].getFrame()
-                    f = colorize_depth(raw, COLORMAPS[colormap_idx], depth_max)
-                    f = resize_to_preview(f)
-                    lbl = f"DEPTH [{COLORMAP_NAMES[colormap_idx]}] max={depth_max // 1000}m"
-                    f = draw_fps(f, fps_data["depth"]["fps"], lbl)
-                    _update_stream("DEPTH", f)
-
-                # Small sleep to prevent burning high CPU resources in an unthrottled loop
-                time.sleep(0.001)
-
-    except KeyboardInterrupt:
-        print("\nShutting down pipeline and server gracefully …")
+    while True:
+        try:
+            connect_and_stream(fps_data, colormap_idx, depth_max)
+        except KeyboardInterrupt:
+            print("\nShutting down pipeline and server gracefully …")
+            break
+        except RuntimeError as e:
+            print(f"\n⚠️  Device communication error: {e}")
+            show_reconnecting_streams()
+            print(f"Retrying in {RECONNECT_DELAY_S:.0f}s … (Ctrl+C to stop)")
+            time.sleep(RECONNECT_DELAY_S)
+        except Exception as e:
+            print(f"\n⚠️  Unexpected device error: {e}")
+            show_reconnecting_streams()
+            print(f"Retrying in {RECONNECT_DELAY_S:.0f}s … (Ctrl+C to stop)")
+            time.sleep(RECONNECT_DELAY_S)
 
 
 if __name__ == "__main__":
