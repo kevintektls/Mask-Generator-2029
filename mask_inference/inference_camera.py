@@ -23,7 +23,7 @@ except ImportError:
 # Config
 MODEL_PATH  = Path("../model/unet.pth")
 DISPLAY_W, DISPLAY_H = 640, 480
-UNET_SIZE   = (256, 256)
+UNET_SIZE   = (128, 128)
 FPS         = 30
 HTTP_PORT   = 5000
 
@@ -75,6 +75,8 @@ print(f"Loading U-Net from {MODEL_PATH}...")
 model = UNet()
 model.load_state_dict(torch.load(str(MODEL_PATH), map_location="cpu", weights_only=True))
 model.eval()
+model = torch.jit.script(model)          # compile le graph
+torch.set_num_threads(4)                 # Jetson Nano a 4 cœurs ARM
 print("✓ Model loaded")
 
 transform = transforms.Compose([
@@ -135,7 +137,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
 
 def start_http_server():
     server = HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler)
-    print(f"✓ Stream dispo sur http://<IP_JETSON>:{HTTP_PORT}")
+    print(f"✓ Stream dispo sur http://10.15.193.172:{HTTP_PORT}")
     server.serve_forever()
 
 # ── Pipeline OAK-D ───────────────────────────────────────────────────────────
