@@ -229,6 +229,7 @@ def main():
 
     try:
         with dai.Device(pipeline) as device:
+            print("🔌 Vitesse USB détectée :", device.getUsbSpeed())
             q_left = device.getOutputQueue(name="left", maxSize=4, blocking=False)
             q_right = device.getOutputQueue(name="right", maxSize=4, blocking=False)
             q_depth = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
