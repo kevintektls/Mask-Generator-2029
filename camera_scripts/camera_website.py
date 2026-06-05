@@ -47,6 +47,7 @@ SNAPSHOT_DIR = Path("snapshots")
 PORT = 8080
 RECONNECT_DELAY_S = 5.0
 USB2_MAX_FPS = 20
+MAX_FPS = 120
 USB2_PREVIEW_SIZE = (640, 480)
 USB2_DEPTH_PREVIEW_SIZE = (480, 360)
 JPEG_QUALITY = 92
@@ -128,7 +129,7 @@ class RuntimeSettings:
                 self.show_fps = bool(data["show_fps"])
 
             if "fps" in data:
-                new_fps = max(5, min(30, int(data["fps"])))
+                new_fps = max(5, min(MAX_FPS, int(data["fps"])))
                 if new_fps != self.fps:
                     self.fps = new_fps
                     restart = True
@@ -347,7 +348,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
         <aside class="sidebar">
             <h2>Settings</h2>
             <label>FPS (device)
-                <input id="fps" type="range" min="5" max="30" step="1">
+                <input id="fps" type="range" min="5" max="120" step="1">
                 <span id="fps_val"></span>
             </label>
             <label>Resolution
