@@ -7,6 +7,7 @@ Affiche image + masque (lignes blanches) côte à côte.
 import sys
 import time
 from pathlib import Path
+from PIL import Image
 
 import cv2
 import numpy as np
@@ -84,7 +85,9 @@ def main():
             
             # Inférence U-Net
             frame_resized = cv2.resize(frame, (347, 256))
-            tensor = transform(cv2.cvtColor(frame_resized, cv2.COLOR_GRAY2RGB)).unsqueeze(0)
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_GRAY2RGB)
+            frame_pil = Image.fromarray(frame_rgb)
+            tensor = transform(frame_pil).unsqueeze(0)
             
             with torch.no_grad():
                 mask_logits = model(tensor)
