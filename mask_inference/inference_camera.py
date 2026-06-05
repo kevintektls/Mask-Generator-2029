@@ -21,14 +21,18 @@ except ImportError:
     sys.exit(1)
 
 # Config
-MODEL_PATH = Path("../model/unet_scripted.pt")
+MODEL_PATH = Path("../model/unet.pth")  # Utilise le modèle PyTorch standard
 PREVIEW_SIZE = (640, 480)
 FPS = 30
 MODEL_INPUT_SIZE = (347, 256)  # (width, height) - exact size expected by model
 
 # Charge modèle
 print(f"Loading U-Net from {MODEL_PATH}...")
-model = torch.jit.load(str(MODEL_PATH))
+if not MODEL_PATH.exists():
+    print(f"ERROR: Model not found at {MODEL_PATH}")
+    sys.exit(1)
+
+model = torch.load(str(MODEL_PATH), map_location='cpu')
 model.eval()
 print("✓ Model loaded\n")
 
