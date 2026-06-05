@@ -12,6 +12,7 @@ from PIL import Image
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 from torchvision import transforms
 
 try:
@@ -21,10 +22,56 @@ except ImportError:
     sys.exit(1)
 
 # Config
-MODEL_PATH = Path("../model/unet.pth")  # Utilise le modèle PyTorch standard
+MODEL_PATH = Path("../model/unet.pth")
 PREVIEW_SIZE = (640, 480)
 FPS = 30
-MODEL_INPUT_SIZE = (347, 256)  # (width, height) - exact size expected by model
+MODEL_INPUT_SIZE = (347, 256)  # (width, height)
+
+# ── U-NET Architecture (same as train.py) ──────────────────────────────────
+class ConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self, x):
+        return self.block(x)
+
+class UNet(nn.Module):
+    def __init__(self, features=(16, 32, 64, 128)):
+        super().__init__()
+        self.enc1 = ConvBlock(3, features[0])
+        self.enc2 = ConvBlock(features[0], features[1])
+        self.enc3 = ConvBlock(features[1], features[2])
+        self.enc4 = ConvBlock(features[2], features[3])
+        self.pool = nn.MaxPool2d(2)
+        self.bottleneck = ConvBlock(features[3], features[3] * 2)
+        self.up4 = nn.ConvTranspose2d(features[3] * 2, features[3], 2, 2)
+        self.dec4 = ConvBlock(features[3] * 2, features[3])
+        self.up3 = nn.ConvTranspose2d(features[3], features[2], 2, 2)
+        self.dec3 = ConvBlock(features[2] * 2, features[2])
+        self.up2 = nn.ConvTranspose2d(features[2], features[1], 2, 2)
+        self.dec2 = ConvBlock(features[1] * 2, features[1])
+        self.up1 = nn.ConvTranspose2d(features[1], features[0], 2, 2)
+        self.dec1 = ConvBlock(features[0] * 2, features[0])
+        self.final = nn.Conv2d(features[0], 1, kernel_size=1)
+    
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
+        b = self.bottleneck(self.pool(e4))
+        d4 = self.dec4(torch.cat([self.up4(b), e4], dim=1))
+        d3 = self.dec3(torch.cat([self.up3(d4), e3], dim=1))
+        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+        return torch.sigmoid(self.final(d1))
 
 # Charge modèle
 print(f"Loading U-Net from {MODEL_PATH}...")
@@ -32,7 +79,8 @@ if not MODEL_PATH.exists():
     print(f"ERROR: Model not found at {MODEL_PATH}")
     sys.exit(1)
 
-model = torch.load(str(MODEL_PATH), map_location='cpu')
+model = UNet()
+model.load_state_dict(torch.load(str(MODEL_PATH), map_location='cpu'))
 model.eval()
 print("✓ Model loaded\n")
 
