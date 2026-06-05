@@ -25,7 +25,7 @@ except ImportError:
 MODEL_PATH = Path("../model/unet.pth")
 PREVIEW_SIZE = (640, 480)
 FPS = 30
-MODEL_INPUT_SIZE = (347, 256)  # (width, height)
+MODEL_INPUT_SIZE = (256, 256)  # (width, height) - model trained on 256x256
 
 # ── U-NET Architecture (same as train.py) ──────────────────────────────────
 class ConvBlock(nn.Module):
