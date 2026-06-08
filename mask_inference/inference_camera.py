@@ -147,7 +147,7 @@ def build_pipeline():
     cam = pipeline.create(dai.node.MonoCamera)
     cam.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-    cam.setFps(30)
+    cam.setFps(15)
     xout = pipeline.create(dai.node.XLinkOut)
     xout.setStreamName("left")
     xout.input.setBlocking(False)
