@@ -105,7 +105,7 @@ def build_pipeline():
     cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
     
     # On peut repasser à 20 ou 30 FPS sans problème maintenant !
-    cam.setFps(30) 
+    cam.setFps(60) 
     
     xout = pipeline.create(dai.node.XLinkOut)
     xout.setStreamName("left")
