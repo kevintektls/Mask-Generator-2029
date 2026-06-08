@@ -21,25 +21,27 @@ HTTP_PORT         = 5000
 # Si la luminosité change bcp, le seuillage adaptatif est préférable.
 USE_ADAPTIVE_THRESH = False
 
-# ── Traitement d'image classique (Inversé : Lignes Noires, Fond Blanc) ───────
+# ── Traitement d'image classique (Remplace U-Net) ──────────────────────────────
 def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
     """
-    Prend une image en niveaux de gris et isole les lignes en NOIR sur fond BLANC.
+    Prend une image en niveaux de gris et isole les lignes blanches.
+    Retourne un masque binaire (0 ou 255) de la taille d'origine.
     """
-    # 1. Réduire le bruit
+    # 1. Réduire le bruit (indispensable pour éviter les faux positifs)
     blurred = cv2.GaussianBlur(frame_gray, (5, 5), 0)
     
     if USE_ADAPTIVE_THRESH:
-        # THRESH_BINARY_INV inverse le résultat : le "vrai" devient noir (0) et le reste blanc (255)
+        # S'adapte aux changements de lumière locaux
+        # 255 = blanc pour la ligne, 21 = taille du bloc, 4 = constante soustraite
         mask = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY_INV, 21, 4
+            cv2.THRESH_BINARY, 21, 4
         )
     else:
-        # Idem ici, THRESH_BINARY_INV pour le seuillage classique
-        _, mask = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY_INV)
+        # Seuillage classique : tout ce qui est au-dessus de 180 devient blanc
+        _, mask = cv2.threshold(blurred, 180, 255, cv2.THRESH_BINARY)
         
-    # Opération morphologique pour nettoyer les imperfections
+    # Optionnel : Opération morphologique pour nettoyer les petits points noirs/blancs isolés
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     
