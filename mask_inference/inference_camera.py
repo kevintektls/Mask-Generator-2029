@@ -14,11 +14,11 @@ except ImportError:
     print("DepthAI not installed."); sys.exit(1)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MODEL_PATH        = Path("../model/unet.pth")
+MODEL_PATH        = Path("../model/unet_quantized.pth")  # Quantized int8 model
 DISPLAY_W         = 640
 DISPLAY_H         = 480
-UNET_SIZE         = 128          # 128 au lieu de 256 → ×4 plus rapide, suffisant pour lignes épaisses
-INFER_EVERY_N     = 2            # n'inférer qu'1 frame sur N (skip frames)
+UNET_SIZE         = 256          # 128 au lieu de 256 → ×4 plus rapide, suffisant pour lignes épaisses
+INFER_EVERY_N     = 1            # Inférer chaque frame (quantization = rapide)
 HTTP_PORT         = 5000
 torch.set_num_threads(4)         # Jetson Nano = 4 cœurs ARM Cortex-A57
 
@@ -190,22 +190,17 @@ def main():
             if frame_count % INFER_EVERY_N == 0:
                 last_mask = run_inference(raw)
 
-            # Panels affichage
-            frame_bgr = cv2.resize(
-                cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR),
-                (DISPLAY_W, DISPLAY_H)
-            )
+            # Affiche SEULEMENT le masque (optimisé pour Jetson Nano)
             mask_bgr = cv2.resize(
                 cv2.cvtColor(last_mask, cv2.COLOR_GRAY2BGR),
                 (DISPLAY_W, DISPLAY_H)
             )
 
             label = f"{fps:.1f} FPS  (infer 1/{INFER_EVERY_N})"
-            cv2.putText(frame_bgr, label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(mask_bgr,  label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             with frame_lock:
-                latest_frame = np.hstack([frame_bgr, mask_bgr])
+                latest_frame = mask_bgr  # Affiche juste le masque
 
 if __name__ == "__main__":
     try:
