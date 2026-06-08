@@ -19,7 +19,7 @@ HTTP_PORT         = 5000
 # Paramètres de détection (Ajustables selon ton éclairage)
 # Si tes lignes sont très nettes, un seuillage binaire classique (cv2.threshold) suffit.
 # Si la luminosité change bcp, le seuillage adaptatif est préférable.
-USE_ADAPTIVE_THRESH = True
+USE_ADAPTIVE_THRESH = False
 
 # ── Traitement d'image classique (Inversé : Lignes Noires, Fond Blanc) ───────
 def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
