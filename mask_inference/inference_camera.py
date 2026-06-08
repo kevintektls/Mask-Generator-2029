@@ -17,7 +17,7 @@ except ImportError:
 MODEL_PATH        = Path("../model/unet_quantized.pth")  # Quantized int8 model
 DISPLAY_W         = 640
 DISPLAY_H         = 480
-UNET_SIZE         = 256          # 128 au lieu de 256 → ×4 plus rapide, suffisant pour lignes épaisses
+UNET_SIZE         = 128         # 128 au lieu de 256 → ×4 plus rapide, suffisant pour lignes épaisses
 INFER_EVERY_N     = 1            # Inférer chaque frame (quantization = rapide)
 HTTP_PORT         = 5000
 torch.set_num_threads(4)         # Jetson Nano = 4 cœurs ARM Cortex-A57
@@ -147,7 +147,7 @@ def build_pipeline():
     cam = pipeline.create(dai.node.MonoCamera)
     cam.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-    cam.setFps(15)
+    cam.setFps(5)
     xout = pipeline.create(dai.node.XLinkOut)
     xout.setStreamName("left")
     xout.input.setBlocking(False)
@@ -160,7 +160,7 @@ def main():
     global latest_frame
 
     threading.Thread(target=start_http_server, daemon=True).start()
-    print(f"✓ Stream sur http://$(hostname -I | awk '{{print $1}}'):{HTTP_PORT}")
+    print(f"✓ Stream sur http://$(hostname -I | awk '10.15.193.172':{HTTP_PORT}")
 
     pipeline = build_pipeline()
     with dai.Device(pipeline) as device:
