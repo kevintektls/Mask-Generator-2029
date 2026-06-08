@@ -157,12 +157,27 @@ def build_pipeline():
     return pipeline
 
 def run_inference(frame_gray):
-    pil    = Image.fromarray(cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2RGB))
-    tensor = transform(pil).unsqueeze(0)
+    """Inférence rapide : resize une fois, pas de PIL"""
+    resized = cv2.resize(frame_gray, UNET_SIZE)
+    rgb = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB)
+    tensor = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
+    tensor = tensor.unsqueeze(0)
     with torch.no_grad():
         pred = model(tensor)
     mask = (pred > 0.5).squeeze().cpu().numpy()
     return (mask * 255).astype(np.uint8)
+
+def inference_thread_func(frame_queue, result_queue):
+    """Thread dédié à l'inférence (ne bloque pas capture)"""
+    while True:
+        try:
+            frame = frame_queue.get(timeout=1)
+            if frame is None:
+                break
+            mask = run_inference(frame)
+            result_queue.put(mask, block=False)
+        except:
+            pass
 
 def main():
     global latest_frame
@@ -171,33 +186,54 @@ def main():
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
 
+    # Files pour paralléliser capture et inférence
+    from queue import Queue
+    frame_q = Queue(maxsize=1)
+    result_q = Queue(maxsize=1)
+    
+    # Thread inférence
+    inf_thread = threading.Thread(target=inference_thread_func, args=(frame_q, result_q), daemon=True)
+    inf_thread.start()
+
     print("Building OAK-D pipeline...")
     pipeline = build_pipeline()
 
     with dai.Device(pipeline) as device:
-        q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
+        q = device.getOutputQueue(name="left", maxSize=1, blocking=False)
         print("✓ Camera connected!\nCtrl+C pour quitter.\n")
 
         count, t0, fps = 0, time.monotonic(), 0.0
+        latest_mask = np.zeros((256, 256), dtype=np.uint8)
 
         while True:
             pkt = q.tryGet()
+            if pkt is not None:
+                count += 1
+                now = time.monotonic()
+                if now - t0 >= 1.0:
+                    fps = count / (now - t0); count = 0; t0 = now
+
+                raw = pkt.getCvFrame()
+                try:
+                    frame_q.put_nowait(raw)
+                except:
+                    pass
+
+            # Récupère dernier masque calculé
+            try:
+                latest_mask = result_q.get_nowait()
+            except:
+                pass
+
             if pkt is None:
                 time.sleep(0.001)
                 continue
 
-            count += 1
-            now = time.monotonic()
-            if now - t0 >= 1.0:
-                fps = count / (now - t0); count = 0; t0 = now
-
-            raw = pkt.getCvFrame()
-
+            # Affichage (pas d'inférence bloquante ici)
             frame_bgr = cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR)
             frame_bgr = cv2.resize(frame_bgr, (DISPLAY_W, DISPLAY_H))
 
-            mask_u8  = run_inference(raw)
-            mask_bgr = cv2.cvtColor(mask_u8, cv2.COLOR_GRAY2BGR)
+            mask_bgr = cv2.cvtColor(latest_mask, cv2.COLOR_GRAY2BGR)
             mask_bgr = cv2.resize(mask_bgr, (DISPLAY_W, DISPLAY_H))
 
             label = f"{fps:.1f} FPS"
