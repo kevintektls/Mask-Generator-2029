@@ -23,8 +23,8 @@ except ImportError:
 # Config
 MODEL_PATH  = Path("../model/unet.pth")
 DISPLAY_W, DISPLAY_H = 640, 480
-UNET_SIZE   = (128, 128)
-FPS         = 30
+UNET_SIZE   = (256, 256)  # Model trained on 256x256
+FPS         = 15  # Réduit pour Jetson Nano (4 ARM cores)
 HTTP_PORT   = 5000
 
 # ── U-Net (archi identique au train.py) ──────────────────────────────────────
@@ -75,8 +75,10 @@ print(f"Loading U-Net from {MODEL_PATH}...")
 model = UNet()
 model.load_state_dict(torch.load(str(MODEL_PATH), map_location="cpu", weights_only=True))
 model.eval()
+# Fuse BatchNorm dans Conv pour Jetson Nano
+torch.quantization.fuse_modules(model, [['enc1.block.0', 'enc1.block.1']], inplace=True) if hasattr(torch.quantization, 'fuse_modules') else None
 model = torch.jit.script(model)          # compile le graph
-torch.set_num_threads(4)                 # Jetson Nano a 4 cœurs ARM
+torch.set_num_threads(2)                 # Jetson Nano a 4 cœurs, mais réduit pour stabilité
 print("✓ Model loaded")
 
 transform = transforms.Compose([
