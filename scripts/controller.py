@@ -28,6 +28,21 @@ MAX_DUTY_CYCLE = 0.3 # can be changed
 SERVO_CENTER   = 0.5
 SERVO_RANGE    = 0.3
 POLL_INTERVAL = 0.05
+SLOW_FACTOR = 0.5
+
+def clamp(value, min_val, max_val):
+    return max(min_val, min(max_val, value))
+ 
+def apply_deadzone(value):
+    if abs(value) < DEADZONE:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * (abs(value) - DEADZONE) / (1.0 - DEADZONE)
+ 
+def triggers_to_duty(forward_raw, backward_raw):
+    throttle = clamp(forward_raw - backward_raw, -1.0, 1.0)
+    throttle = apply_deadzone(throttle)
+    return clamp(throttle * MAX_DUTY_CYCLE, -MAX_DUTY_CYCLE, MAX_DUTY_CYCLE)
 
 def my_vesc_connect():
     last_exception = None
@@ -66,6 +81,10 @@ def main():
                     forward_raw  = gamepad.axis(AXIS_FORWARD)
                     backward_raw = gamepad.axis(AXIS_BACKWARD)
                     steering_raw = gamepad.axis(AXIS_STEERING)
+
+                    duty = triggers_to_duty(forward_raw, backward_raw)
+                    if gamepad.isPressed("LB"):
+                        duty *= SLOW_FACTOR
 
             except Exception as e:
                 print(f'[ERROR] Error reading gamepad axes: {e}')
