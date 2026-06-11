@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Robot Car — Pilotage autonome avec Mémoire Temporelle et Vitesse Adaptative
+Robot Car — Pilotage autonome par détection de lignes
+Optimisation : Égalisation locale de contraste (CLAHE) + Verrou de virage serré
 """
 
 from __future__ import annotations
@@ -41,18 +42,14 @@ except ImportError:
     sys.exit(1)
 
 
-# ── Configuration Optimisée ────────────────────────────────────────────────────
+# ── Configuration Système & Trajectoire ────────────────────────────────────────
 
 DISPLAY_W = 640
 DISPLAY_H = 480
 CAM_FPS   = 60
 HTTP_PORT = 5000
 
-# Détection de lignes
-USE_ADAPTIVE_THRESH = False
-BINARY_THRESHOLD    = 170  
-
-# Découpage des zones de vision
+# Découpage des zones de vision (Ratios verticaux)
 ROI_FAR_TOP     = 0.48
 ROI_FAR_BOT     = 0.65
 ROI_NEAR_TOP    = 0.68
@@ -61,53 +58,63 @@ ROI_NEAR_BOT    = 0.85
 LANE_WIDTH_PX    = 340  
 LANE_WIDTH_MIN   = 160
 
-# 🧠 Paramètre de mémoire (Lissage temporel)
-# Plus la valeur est petite (ex: 0.15), plus la voiture a de la mémoire et est fluide.
-# Plus elle est grande (ex: 0.8), plus elle réagit vite mais risque d'osciller.
+# Paramètre de mémoire (Lissage temporel du servo)
+# Évite les mouvements brusques en ligne droite sans brider les virages
 SMOOTHING_ALPHA = 0.25  
 
-# 🔌 VESC
+# VESC
 VESC_PORT            = '/dev/ttyACM0'
 VESC_BAUDRATE        = 115200
 VESC_TIMEOUT         = 1.0
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0
 
-# 🏎️ Pilotage & Vitesse (Modérés pour la stabilité)
+# Pilotage & Vitesse (Mode Sécurisé / Prudent)
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 
-AUTO_DUTY       = 0.045  # Vitesse max baissée (était à 0.07) pour garder le contrôle
-AUTO_DUTY_MIN   = 0.010  # Vitesse plancher très basse pour forcer à ramper si besoin
-TURN_SLOWDOWN   = 0.90   # Freine plus agressivement en virage (75% de la vitesse coupée au max)
+AUTO_DUTY       = 0.045  # Vitesse en ligne droite (basse pour maîtriser le kart)
+AUTO_DUTY_MIN   = 0.010  # Vitesse plancher en virage serré (laisse enrouler sans pousser dehors)
+TURN_SLOWDOWN   = 0.90   # Coupe jusqu'à 90% de la puissance au braquage max
 
 GAMEPAD_TYPE    = Gamepad.Xbox360
 
 
-# ── Variable d'état globale pour la mémoire du servo ──────────────────────────
+# ── Variables d'état globales ──────────────────────────────────────────────────
 prev_servo_pos = SERVO_CENTER
 
 
-# ── Traitement d'Image ────────────────────────────────────────────────────────
+# ── Nouvel Algorithme de Vision Anti-Reflets & Lumière ────────────────────────
 
-def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.ndarray:
-    blurred = cv2.bilateralFilter(frame_gray, 7, 50, 50)
-    if adaptive:
-        mask = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 3
-        )
-    else:
-        _, mask = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
+def detect_lines(frame_gray: np.ndarray, *args, **kwargs) -> np.ndarray:
+    """
+    Algorithme robuste : Égalisation CLAHE + Seuillage dynamique.
+    Idéal pour détacher des lignes blanches sur sol noir malgré les variations lumineuses.
+    """
+    # 1. Flou bilatéral pour lisser le grain de la route en gardant les bords nets
+    blurred = cv2.bilateralFilter(frame_gray, 5, 45, 45)
     
+    # 2. CLAHE : Égalise le contraste par blocs locaux. Supprime l'effet "tout blanc"
+    # dû à un spot de lumière ou un reflet de néon sur le sol.
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    equalized = clahe.apply(blurred)
+    
+    # 3. Seuillage automatique par la méthode d'Otsu 
+    # Calcule dynamiquement le meilleur seuil entre le sol noir et la ligne blanche
+    _, mask = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 4. Nettoyage morphologique pour connecter les lignes et effacer les poussières
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) 
+    
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   # Supprime les bruits blancs isolés
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # Soude les morceaux de ligne coupés
+    
     return mask
 
 
 def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
+    """Analyse une bande horizontale via l'histogramme de pixels blancs."""
     h, w = mask.shape
     mid = w // 2
     band = mask[y_top:y_bot, :]
@@ -142,7 +149,7 @@ def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | 
 
 
 def compute_steering(mask: np.ndarray):
-    """Calcule l'ordre servo avec suivi de trajectoire et verrou anti-redressement."""
+    """Calcule l'ordre du servo avec verrouillage anti-redressement en virage à 90°."""
     global prev_servo_pos
     h, w = mask.shape
     mid = w // 2
@@ -153,61 +160,93 @@ def compute_steering(mask: np.ndarray):
     target_near, left_x, right_x, status_near = _get_band_center(mask, n_top, n_bot)
     target_far, _, _, status_far = _get_band_center(mask, f_top, f_bot)
 
-    # ── 1. Sécurité : Perte totale de visibilité en plein virage ──────────────
+    # ── 1. Protection Perte de Ligne au Milieu du Virage ──────────────────────
     if target_near is None and target_far is None:
-        # Si on tournait fort, on maintient le braquage (on ne remet PAS droit !)
         if abs(prev_servo_pos - SERVO_CENTER) > 0.15:
             return prev_servo_pos, False, mid, -1, -1, "NONE", "NONE"
         return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
 
-    # ── 2. Logique de décision et fusion adaptative ──────────────────────────
+    # ── 2. Fusion des Cibles avec Verrou de Virage Serré ──────────────────────
     if target_near is not None and target_far is not None:
-        far_error = abs(target_far - mid) / (mid)
-        near_error = abs(target_near - mid) / (mid)
+        far_error = abs(target_far - mid) / mid
+        near_error = abs(target_near - mid) / mid
         
-        # SI l'horizon détecte un virage violent (ex: 90°) OU que la voiture est déjà engagée
+        # Si un virage important est détecté (Otsu / Horizon excentré)
         if far_error > 0.30 or near_error > 0.30:
-            # On donne la priorité absolue à la cible la plus excentrée (celle qui tourne le plus)
-            if far_error > near_error:
-                target = target_far
-            else:
-                target = target_near
+            # On prend la cible la plus engagée dans le virage pour ne pas redresser
+            target = target_far if far_error > near_error else target_near
         else:
-            # Ligne droite ou courbe légère standard
-            target = (0.50 * target_near) + (0.50 * target_far)
+            # Ligne droite : stabilité maximale (60% NEAR / 40% FAR)
+            target = (0.60 * target_near) + (0.40 * target_far)
             
     elif target_far is not None:
         target = target_far
     else:
         target = target_near
 
-    # ── 3. Calcul de l'erreur et amplification du braquage max ───────────────
-    error = (target - mid) / (mid)
+    # ── 3. Normalisation et Amplification du Braquage ────────────────────────
+    error = (target - mid) / mid
     
-    # Si l'erreur est forte (virage à 90°), on casse la progressivité pour braquer à fond immédiatement
     if abs(error) > 0.35:
         error_smoothed = 1.0 if error > 0 else -1.0
     else:
         sign = 1.0 if error >= 0 else -1.0
         error_smoothed = sign * (abs(error) ** 1.1)
 
-    # Cible brute
     raw_servo_pos = SERVO_CENTER + (error_smoothed * SERVO_RANGE)
     raw_servo_pos = max(0.0, min(1.0, raw_servo_pos))
     
-    # ── 4. Mémoire dynamique asymétrique ──────────────────────────────────────
-    # Si la voiture doit BRAQUER plus fort, on réagit très vite (alpha élevé)
-    # Si elle veut se REDRESSER, on la freine (alpha très faible) pour maintenir le virage
+    # ── 4. Mémoire Asymétrique (Interdiction du sursaut directionnel) ─────────
     if abs(raw_servo_pos - SERVO_CENTER) > abs(prev_servo_pos - SERVO_CENTER):
-        alpha = 0.45  # Réactivité d'entrée en virage
+        alpha = 0.45  # On autorise à braquer très vite s'il le faut
     else:
-        alpha = 0.12  # Forte mémoire pour interdire le redressement brutal
+        alpha = 0.12  # On filtre fortement le redressement pour stabiliser la courbe
 
     actual_servo = (1.0 - alpha) * prev_servo_pos + alpha * raw_servo_pos
     actual_servo = max(0.0, min(1.0, actual_servo))
     
     prev_servo_pos = actual_servo
     return actual_servo, True, int(target), left_x, right_x, status_near, status_far
+
+
+# ── Serveur Streaming HTTP MJPEG ──────────────────────────────────────────────
+latest_frame: np.ndarray | None = None
+frame_lock = threading.Lock()
+stop_event = threading.Event()
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.path == "/":
+            html = (
+                b"<!DOCTYPE html><html><head><title>Robot Car Mask</title>"
+                b"<style>body{background:#111;margin:0;display:flex;justify-content:center;align-items:center;height:100vh;}"
+                b"img{max-width:100%;border:2px solid #00ffca;box-shadow: 0 0 25px #00ffca;}</style></head>"
+                b"<body><img src='/stream'></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+        elif self.path == "/stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.end_headers()
+            try:
+                while not stop_event.is_set():
+                    with frame_lock: frame = latest_frame
+                    if frame is None:
+                        time.sleep(0.01)
+                        continue
+                    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if not ok: continue
+                    data = jpg.tobytes()
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError): pass
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def start_http_server():
     try: HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
@@ -217,10 +256,10 @@ def vesc_connect() -> VESC:
     for attempt in range(VESC_CONNECT_RETRIES):
         try:
             vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
-            print(f"[INFO] VESC connecté")
+            print("[INFO] VESC Connecté avec succès")
             return vesc
         except Exception: time.sleep(VESC_CONNECT_SETTLE)
-    raise Exception("VESC introuvable")
+    raise Exception("Erreur critique : Impossible de joindre le VESC.")
 
 def build_pipeline() -> dai.Pipeline:
     pipeline = dai.Pipeline()
@@ -235,6 +274,9 @@ def build_pipeline() -> dai.Pipeline:
     cam.out.link(xout.input)
     return pipeline
 
+
+# ── Boucle Principale de Contrôle ─────────────────────────────────────────────
+
 def main():
     global latest_frame
     threading.Thread(target=start_http_server, daemon=True).start()
@@ -247,26 +289,27 @@ def main():
     vesc = vesc_connect()
     pipeline = build_pipeline()
 
-    adaptive  = USE_ADAPTIVE_THRESH
-    threshold = BINARY_THRESHOLD
     count, t0, fps_val = 0, time.monotonic(), 0.0
-    stopped = True  
+    stopped = True  # Sécurité : démarre impérativement à l'arrêt
     prev_lb = False
     has_display = bool(os.environ.get("DISPLAY"))
 
     with vesc:
         vesc.set_servo(SERVO_CENTER)
         vesc.set_duty_cycle(0)
+        print("\n=== SYSTEM READY ===")
+        print("Appuyez sur le bouton LB du Gamepad pour basculer en mode RUN\n")
         
         try:
             with dai.Device(pipeline) as device:
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
                 while not stop_event.is_set():
+                    # Gestion de l'interrupteur LB
                     lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
                     if lb_now and not prev_lb:
                         stopped = not stopped
-                        print(f"[GAMEPAD] {'⏸ STOP' if stopped else '▶ RUN'}")
+                        print(f"[STATUS] SWITCHED TO -> {'⏸ STOP' if stopped else '▶ RUNNING'}")
                     prev_lb = lb_now
 
                     pkt = q.tryGet()
@@ -282,7 +325,8 @@ def main():
                         count = 0
                         t0 = now
 
-                    mask = detect_lines(raw, adaptive, threshold)
+                    # Vision & Calcul Trajectoire
+                    mask = detect_lines(raw, False, 0)
                     (servo_pos, line_found, target_x,
                      left_x, right_x, lane_near, lane_far) = compute_steering(mask)
 
@@ -292,7 +336,7 @@ def main():
                         vesc.set_servo(SERVO_CENTER)
                         direction = "STOP"
                     else:
-                        # Vitesse proportionnelle au braquage
+                        # Adaptation dynamique de la vitesse (Ralentissement en courbe)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         if line_found:
                             duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
@@ -307,28 +351,30 @@ def main():
                         elif servo_pos > SERVO_CENTER + 0.04: direction = "RIGHT"
                         else: direction = "STRAIGHT"
 
-                    # Rendu visuel 
+                    # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
                     sx = DISPLAY_W / src_w
 
+                    # Affichage des boîtes de scan (NEAR=Jaune, FAR=Cyan)
                     cv2.rectangle(display, (0, int(DISPLAY_H*ROI_NEAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_NEAR_BOT)), (0, 255, 255), 1)
                     cv2.rectangle(display, (0, int(DISPLAY_H*ROI_FAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_FAR_BOT)), (255, 255, 0), 1)
 
                     if left_x >= 0: cv2.circle(display, (int(left_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
                     if right_x >= 0: cv2.circle(display, (int(right_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
 
+                    # Affichage du vecteur cible (Rouge)
                     tx = int(target_x * sx)
                     cv2.circle(display, (tx, int(DISPLAY_H * ROI_FAR_TOP)), 8, (0, 0, 255), -1)
                     cv2.line(display, (DISPLAY_W // 2, DISPLAY_H), (tx, int(DISPLAY_H * ROI_FAR_TOP)), (0, 0, 255), 2)
 
+                    # Infos HUD incrustées
                     cv2.rectangle(display, (0, 0), (DISPLAY_W, 30), (0, 0, 0), -1)
-                    status_str = f"FPS: {fps_val:.1f} | {'[STOP]' if stopped else '[AUTONOMOUS]'} | Dir: {direction} | Servo: {servo_pos:.2f} | Duty: {duty:.3f}"
+                    status_str = f"{fps_val:.1f} FPS | {'[STOP]' if stopped else '[RUN]'} | {direction} | Servo: {servo_pos:.2f} | Duty: {duty:.3f}"
                     cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 202), 1)
 
-                    with frame_lock:
-                        latest_frame = display
+                    with frame_lock: latest_frame = display
 
                     if has_display:
                         cv2.imshow("Lane Mask Output", display)
