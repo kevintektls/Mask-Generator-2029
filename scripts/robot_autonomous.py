@@ -23,6 +23,8 @@ Sécurité :
     - Si aucune ligne détectée → vitesse réduite à AUTO_DUTY_SLOW
 """
 
+from __future__ import annotations
+
 import sys
 import time
 import gc
