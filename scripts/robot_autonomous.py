@@ -101,7 +101,7 @@ SERVO_RANGE     = 0.45   # amplitude max de braquage depuis le centre
 AUTO_DUTY       = 0.08   # vitesse max en ligne droite
 AUTO_DUTY_MIN   = 0.04   # vitesse min (gros virage / aucune ligne)
 TURN_SLOWDOWN   = 0.7    # quel % de AUTO_DUTY on coupe au braquage max (0..1)
-MAX_DUTY_CYCLE  = 0.35
+MAX_DUTY_CYCLE  = 0.10
 
 # Gamepad (arrêt d'urgence uniquement)
 GAMEPAD_TYPE    = Gamepad.Xbox360
