@@ -2,7 +2,7 @@
 """
 Robot Car — Pilotage & Enregistrement pour Entraînement IA (Behavioral Cloning)
 Plateforme : Jetson Nano 4Go (Optimisé RAM & Stockage via Masque Binaire)
-Version corrigée : Mapping Manuel Manette Alternatif
+Version corrigée avec les vrais axes du Logitech F710 (Mode Xbox360)
 """
 
 from __future__ import annotations
@@ -65,26 +65,31 @@ LANE_WIDTH_PX    = 340
 LANE_WIDTH_MIN   = 160
 SMOOTHING_ALPHA  = 0.25  
 
-# VESC
+# VESC Connection
 VESC_PORT            = '/dev/ttyACM0'
 VESC_BAUDRATE        = 115200
 VESC_TIMEOUT         = 1.0
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0
 
-# Pilotage Auto Géométrique
+# 🎮 Mapping Manette Logitech F710 (Mode X)
+GAMEPAD_TYPE   = Gamepad.Xbox360
+AXIS_FORWARD   = "RT"
+AXIS_BACKWARD  = "LT"
+AXIS_STEERING  = "LEFT-X"
+DEADZONE       = 0.08
+
+# Paramètres Physiques Pilotage
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
-AUTO_DUTY       = 0.045  
+AUTO_DUTY       = 0.045  # Ta vitesse cible max en autonome / manuel
 AUTO_DUTY_MIN   = 0.010  
 TURN_SLOWDOWN   = 0.90   
 
-# 📂 Configuration de l'Enregistrement IA
+# 📂 Configuration du l'Enregistrement IA
 DATASET_DIR = Path("dataset")
 IMAGES_DIR  = DATASET_DIR / "images"
 CSV_FILE    = DATASET_DIR / "driving_log.csv"
-
-GAMEPAD_TYPE = Gamepad.Xbox360
 
 
 # ── Variables d'état globales ──────────────────────────────────────────────────
@@ -93,6 +98,18 @@ is_recording   = False
 csv_writer     = None
 csv_file_handle = None
 record_lock    = threading.Lock()
+
+
+# ── Fonctions Utilitaires Manette ─────────────────────────────────────────────
+
+def clamp(value: float, min_val: float, max_val: float) -> float:
+    return max(min_val, min(max_val, value))
+
+def apply_deadzone(value: float) -> float:
+    if abs(value) < DEADZONE:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * (abs(value) - DEADZONE) / (1.0 - DEADZONE)
 
 
 # ── Vision Ultra-Binaire Rognée ───────────────────────────────────────────────
@@ -298,10 +315,11 @@ def main():
             with dai.Device(pipeline) as device:
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
-                while not stop_event.is_set():
-                    lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
-                    a_now  = gamepad.isConnected() and gamepad.isPressed("A")
+                while not stop_event.is_set() and gamepad.isConnected():
+                    lb_now = gamepad.isPressed("LB")
+                    a_now  = gamepad.isPressed("A")
                     
+                    # Commutateur de Mode (LB)
                     if lb_now and not prev_lb:
                         autonomous_mode = not autonomous_mode
                         if autonomous_mode:
@@ -310,6 +328,7 @@ def main():
                         print(f"[MODE] {'🏎️ AUTONOME GÉOMÉTRIQUE' if autonomous_mode else '🎮 CONDUITE MANUELLE'}")
                     prev_lb = lb_now
 
+                    # Commutateur d'enregistrement (A)
                     if a_now and not prev_a and not autonomous_mode:
                         with record_lock:
                             is_recording = not is_recording
@@ -332,41 +351,34 @@ def main():
 
                     mask = detect_lines(raw)
 
+                    # Gestion de la commande moteur et direction
                     if autonomous_mode:
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         duty = max(AUTO_DUTY_MIN, AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)) if line_found else AUTO_DUTY_MIN
                     else:
-                        # ── 🕹️ Lecture Robuste via Dictionnaire Interne de la Lib ──
-                        steer_input = 0.0
-                        gas_input = 0.0
-                        
-                        if hasattr(gamepad, '_getAxis'):
-                            # Essai avec la méthode interne brute de l'API
-                            steer_input = gamepad._getAxis(0) # Généralement l'axe X du stick gauche
-                            gas_input = gamepad._getAxis(5)  # Généralement l'axe RT
-                        elif hasattr(gamepad, 'axisNames'):
-                            # Fallback si les axes sont mappés en chaînes brutes dans l'instance
-                            for name in gamepad.axisNames:
-                                if "X" in name or "STICK" in name: steer_input = getattr(gamepad, name, 0.0)
-                                if "TR" in name or "RT" in name: gas_input = getattr(gamepad, name, 0.0)
-                        
-                        # Si l'API renvoie des valeurs entre 0 et 255 au lieu de 0.0/1.0 pour la gâchette
-                        if abs(gas_input) > 1.0: gas_input = gas_input / 255.0
-                        if abs(steer_input) > 1.0: steer_input = steer_input / 255.0
+                        # ── 🕹️ Mode Manuel via Syntaxe Correcte .axis() ──
+                        forward_raw  = gamepad.axis(AXIS_FORWARD)
+                        backward_raw = gamepad.axis(AXIS_BACKWARD)
+                        steering_raw = gamepad.axis(AXIS_STEERING)
 
-                        servo_pos = SERVO_CENTER + (steer_input * SERVO_RANGE)
-                        servo_pos = max(0.0, min(1.0, servo_pos))
+                        # Calcul de l'accélération (Différence entre avancer et reculer)
+                        throttle = clamp(forward_raw - backward_raw, -1.0, 1.0)
+                        throttle = apply_deadzone(throttle)
+                        duty = clamp(throttle * AUTO_DUTY, -AUTO_DUTY, AUTO_DUTY)
+
+                        # Calcul de la direction
+                        steer_v = apply_deadzone(steering_raw)
+                        servo_pos = clamp(SERVO_CENTER + steer_v * SERVO_RANGE, 0.0, 1.0)
                         
-                        duty = abs(gas_input) * AUTO_DUTY
                         target_x, left_x, right_x = w // 2, -1, -1
 
-                    # Application VESC
+                    # Envoi des consignes physiques au VESC
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    # Sauvegarde
-                    if is_recording and duty > 0.005:
+                    # 💾 Sauvegarde asynchrone des masques binaire
+                    if is_recording and abs(duty) > 0.005:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
@@ -377,7 +389,7 @@ def main():
                             csv_writer.writerow([f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"])
                             csv_file_handle.flush()
 
-                    # HUD
+                    # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
