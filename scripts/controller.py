@@ -12,7 +12,7 @@ from pyvesc import VESC # pyvesc is for cruise control connected in usb mode
 GAMEPAD_TYPE = Gamepad.Xbox360 # Logitech F710 has two modes, and the mode X simulate Xbox360 controller
 AXIS_FORWARD = "RT"
 AXIS_BACKWARD = "LT"
-AXIS_STEERING  = 'RIGHT-X'
+AXIS_STEERING  = 'LEFT-X'
 
 DEADZONE = 0.08 # to prevent of micro movements of the joystick, can be changed
 
