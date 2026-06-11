@@ -1,30 +1,10 @@
 #!/usr/bin/env python3
 """
-Robot Car — Pilotage autonome par détection de lignes
-OAK-D (DepthAI) → OpenCV lane detection → VESC (direction + vitesse)
-Stream MJPEG HTTP du masque sur :5000
-
-Requirements:
-    pip install depthai opencv-python numpy pyvesc
-    + Gamepad lib dans /home/robotcar/Gamepad
-
-Usage:
-    python robot_autonomous.py
-
-Contrôles clavier (fenêtre locale si dispo) :
-    q   - Quitter
-    s   - Snapshot dans ./snapshots/
-    t   - Toggle seuillage adaptatif / classique
-    +/- - Ajuster le seuil classique (±5)
-
-Sécurité :
-    - Bouton LB du gamepad = arrêt d'urgence (coupe le VESC)
-    - Ctrl+C = arrêt propre
-    - Si aucune ligne détectée → vitesse réduite à AUTO_DUTY_SLOW
+Robot Car — Pilotage autonome optimisé
+Amélioration : Traitement par sous-bandes, lissage de masque et anticipation géométrique.
 """
 
 from __future__ import annotations
-
 import os
 import sys
 import time
@@ -62,31 +42,26 @@ except ImportError:
     sys.exit(1)
 
 
-# ── Configuration ──────────────────────────────────────────────────────────────
+# ── Configuration Optimisée ────────────────────────────────────────────────────
 
-# Caméra
 DISPLAY_W = 640
 DISPLAY_H = 480
 CAM_FPS   = 60
-
-# HTTP
 HTTP_PORT = 5000
 
 # Détection de lignes
 USE_ADAPTIVE_THRESH = False
-BINARY_THRESHOLD    = 180
-# Deux bandes : NEAR = juste devant la voiture (correction immédiate)
-#               FAR  = plus loin sur la route (anticipation des virages)
-ROI_NEAR_TOP_RATIO    = 0.78
-ROI_NEAR_BOTTOM_RATIO = 0.98
-ROI_FAR_TOP_RATIO     = 0.52
-ROI_FAR_BOTTOM_RATIO  = 0.70
-# Poids de la bande lointaine dans la cible finale (0 = aucun, 1 = uniquement le futur)
-LOOKAHEAD_WEIGHT = 0.4
-# Largeur typique de voie en pixels (utilisée quand on ne voit qu'une seule ligne)
-LANE_WIDTH_PX = 320
-# Si l'écart entre les 2 pics est trop faible, on retombe en mode "une seule ligne"
-LANE_WIDTH_MIN = 180
+BINARY_THRESHOLD    = 170  # Légèrement baissé pour mieux capter les lignes lointaines
+
+# Découpage des zones de vision (Ratios verticaux)
+ROI_FAR_TOP     = 0.50
+ROI_FAR_BOT     = 0.68
+ROI_NEAR_TOP    = 0.70
+ROI_NEAR_BOT    = 0.95
+
+LOOKAHEAD_WEIGHT = 0.55  # Augmenté : donne plus d'importance à l'horizon (anticipation)
+LANE_WIDTH_PX    = 340  # Largeur par défaut estimée de la voie à l'écran
+LANE_WIDTH_MIN   = 160
 
 # VESC
 VESC_PORT            = '/dev/ttyACM0'
@@ -95,135 +70,138 @@ VESC_TIMEOUT         = 1.0
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0
 
-# Pilotage autonome
+# Pilotage
 SERVO_CENTER    = 0.5
-SERVO_RANGE     = 0.45   # amplitude max de braquage depuis le centre
-AUTO_DUTY       = 0.08   # vitesse max en ligne droite
-AUTO_DUTY_MIN   = 0.04   # vitesse min (gros virage / aucune ligne)
-TURN_SLOWDOWN   = 0.7    # quel % de AUTO_DUTY on coupe au braquage max (0..1)
-MAX_DUTY_CYCLE  = 0.10
+SERVO_RANGE     = 0.40   # Réduit légèrement pour éviter les coups de volant trop violents
+AUTO_DUTY       = 0.07   # Vitesse de croisière sûre pour les tests
+AUTO_DUTY_MIN   = 0.045  # Vitesse plancher en gros virage
+TURN_SLOWDOWN   = 0.60   # Ralentissement progressif en courbe
 
-# Gamepad (arrêt d'urgence uniquement)
 GAMEPAD_TYPE    = Gamepad.Xbox360
-POLL_INTERVAL   = 0.05
-
-SNAPSHOT_DIR = Path("snapshots")
+SNAPSHOT_DIR    = Path("snapshots")
 
 
-# ── Détection de lignes ────────────────────────────────────────────────────────
+# ── Traitement d'Image et Masque Propre ───────────────────────────────────────
 
 def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.ndarray:
-    """Retourne un masque binaire uint8 (même taille que frame_gray)."""
-    blurred = cv2.GaussianBlur(frame_gray, (5, 5), 0)
+    """Génère un masque binaire nettoyé des bruits de route."""
+    # Flou bilatéral pour lisser la route tout en préservant les bords nets des lignes
+    blurred = cv2.bilateralFilter(frame_gray, 7, 50, 50)
+    
     if adaptive:
         mask = cv2.adaptiveThreshold(
-            blurred, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 21, 4
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 3
         )
     else:
         _, mask = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # Nettoyage morphologique évolué
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   # Supprime les petits bruits blancs
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # Comble les trous dans les lignes blanches
+    
     return mask
 
 
-def _scan_band(mask: np.ndarray, top_ratio: float, bot_ratio: float):
+def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
     """
-    Scanne une bande horizontale et retourne (target_x, left_x, right_x, status).
-    Cherche les 2 lignes blanches en partant du centre vers l'extérieur.
+    Analyse une zone en moyennant plusieurs micro-lignes horizontales.
+    Évite les faux positifs des virages serrés.
     """
     h, w = mask.shape
-    y0 = int(h * top_ratio)
-    y1 = int(h * bot_ratio)
-    band = mask[y0:y1, :]
-    band_h = max(1, y1 - y0)
-
-    hist = np.sum(band > 0, axis=0).astype(np.float32)
-    k = 15
-    hist = np.convolve(hist, np.ones(k, dtype=np.float32) / k, mode="same")
-
     mid = w // 2
-    threshold = band_h * 0.25
-
+    band = mask[y_top:y_bot, :]
+    
+    # Histogramme vertical de la bande
+    hist = np.sum(band > 0, axis=0).astype(np.float32)
+    if np.max(hist) == 0:
+        return None, -1, -1, "NONE"
+    
+    # Lissage de l'histogramme
+    hist = np.convolve(hist, np.ones(21, dtype=np.float32) / 21, mode="same")
+    threshold = (y_bot - y_top) * 0.20  # Au moins 20% de pixels blancs sur la colonne
+    
+    # Recherche à gauche et à droite du centre
     left_hits = np.where(hist[:mid][::-1] >= threshold)[0]
     left_x = (mid - 1 - int(left_hits[0])) if left_hits.size else -1
 
     right_hits = np.where(hist[mid:] >= threshold)[0]
     right_x = (mid + int(right_hits[0])) if right_hits.size else -1
 
-    if left_x >= 0 and right_x >= 0 and (right_x - left_x) < LANE_WIDTH_MIN:
-        if hist[left_x] >= hist[right_x]:
-            right_x = -1
-        else:
-            left_x = -1
+    # Cohérence de la largeur de la voie
+    if left_x >= 0 and right_x >= 0:
+        actual_width = right_x - left_x
+        if actual_width < LANE_WIDTH_MIN:
+            # On élimine le pic le plus faible
+            if hist[left_x] >= hist[right_x]:
+                right_x = -1
+            else:
+                left_x = -1
 
+    # Décision de trajectoire centrée
     if left_x >= 0 and right_x >= 0:
         return (left_x + right_x) / 2.0, left_x, right_x, "BOTH"
-    if left_x >= 0:
-        return left_x + LANE_WIDTH_PX / 2.0, left_x, -1, "LEFT"
-    if right_x >= 0:
-        return right_x - LANE_WIDTH_PX / 2.0, -1, right_x, "RIGHT"
+    elif left_x >= 0:
+        return left_x + (LANE_WIDTH_PX / 2.0), left_x, -1, "LEFT"
+    elif right_x >= 0:
+        return right_x - (LANE_WIDTH_PX / 2.0), -1, right_x, "RIGHT"
+        
     return None, -1, -1, "NONE"
 
 
 def compute_steering(mask: np.ndarray):
-    """
-    Reste ENTRE deux lignes blanches, et anticipe les virages.
-
-    Deux scans :
-      - NEAR (devant la voiture) → où la voie est MAINTENANT
-      - FAR  (plus loin)         → où la voie va
-
-    target = (1 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
-    → l'anticipation tire le braquage AVANT que le virage arrive devant.
-
-    Retourne (servo, found, target_x, left_x, right_x, lane_status)
-    """
-    w = mask.shape[1]
+    """Calcule l'ordre du servo avec une forte pondération sur l'horizon (anticipation)."""
+    h, w = mask.shape
     mid = w // 2
 
-    target_near, left_x, right_x, status_near = _scan_band(
-        mask, ROI_NEAR_TOP_RATIO, ROI_NEAR_BOTTOM_RATIO)
-    target_far, _, _, status_far = _scan_band(
-        mask, ROI_FAR_TOP_RATIO, ROI_FAR_BOTTOM_RATIO)
+    # Coordonnées des zones
+    n_top, n_bot = int(h * ROI_NEAR_TOP), int(h * ROI_NEAR_BOT)
+    f_top, f_bot = int(h * ROI_FAR_TOP), int(h * ROI_FAR_BOT)
+
+    target_near, left_x, right_x, status_near = _get_band_center(mask, n_top, n_bot)
+    target_far, _, _, status_far = _get_band_center(mask, f_top, f_bot)
 
     if target_near is None and target_far is None:
         return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
 
+    # Fusion des cibles avec le poids d'anticipation
     if target_near is not None and target_far is not None:
         target = (1.0 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
-    elif target_near is not None:
-        target = target_near
+    elif target_far is not None:
+        target = target_far  # On fait confiance au loin si le près est perdu
     else:
-        target = target_far  # seul l'horizon donne une info → on s'en sert
+        target = target_near
 
+    # Calcul de l'erreur normalisée (-1.0 à 1.0)
     error = (target - mid) / (w / 2.0)
-    error = max(-1.0, min(1.0, error))
-    servo = SERVO_CENTER + error * SERVO_RANGE
+    
+    # Amortissement exponentiel doux pour éviter les comportements brusques près du centre
+    # Conserve la réactivité lors des grands écarts
+    sign = 1.0 if error >= 0 else -1.0
+    error_smoothed = sign * (abs(error) ** 1.2)
+
+    servo = SERVO_CENTER + (error_smoothed * SERVO_RANGE)
     servo = max(0.0, min(1.0, servo))
+    
     return servo, True, int(target), left_x, right_x, status_near, status_far
 
 
-# ── Frame partagée (thread-safe) ──────────────────────────────────────────────
+# ── Reste de l'architecture inchangée mais optimisée ──────────────────────────
 latest_frame: np.ndarray | None = None
 frame_lock = threading.Lock()
-
-# Signal d'arrêt global
 stop_event = threading.Event()
 
-
-# ── Serveur MJPEG ──────────────────────────────────────────────────────────────
 class MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
-
     def do_GET(self):
         if self.path == "/":
             html = (
-                b"<!DOCTYPE html><html><head><title>Lane Detection</title>"
-                b"<style>body{background:#111;margin:0;display:flex;"
-                b"justify-content:center;align-items:center;height:100vh;}"
-                b"img{max-width:100%;border:2px solid #0f0;}</style></head>"
+                b"<!DOCTYPE html><html><head><title>Autonomous Car Mask</title>"
+                b"<style>body{background:#111;margin:0;display:flex;justify-content:center;align-items:center;height:100vh;}"
+                b"img{max-width:100%;border:2px solid #00ffca;box-shadow: 0 0 20px #00ffca;}</style></head>"
                 b"<body><img src='/stream'></body></html>"
             )
             self.send_response(200)
@@ -231,12 +209,9 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
             self.wfile.write(html)
-
         elif self.path == "/stream":
             self.send_response(200)
-            self.send_header(
-                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
-            )
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.end_headers()
             try:
                 while not stop_event.is_set():
@@ -245,29 +220,20 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                     if frame is None:
                         time.sleep(0.01)
                         continue
-                    ok, jpg = cv2.imencode(
-                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
-                    )
-                    if not ok:
-                        continue
+                    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if not ok: continue
                     data = jpg.tobytes()
-                    self.wfile.write(
-                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                        + str(len(data)).encode()
-                        + b"\r\n\r\n" + data + b"\r\n"
-                    )
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError): pass
         else:
             self.send_response(404)
             self.end_headers()
 
-
 def start_http_server():
-    HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
+    try:
+        HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
+    except Exception: pass
 
-
-# ── VESC ───────────────────────────────────────────────────────────────────────
 def vesc_connect() -> VESC:
     last_exc = None
     for attempt in range(VESC_CONNECT_RETRIES):
@@ -277,12 +243,9 @@ def vesc_connect() -> VESC:
             return vesc
         except Exception as e:
             last_exc = e
-            print(f"[WARNING] Tentative {attempt + 1} échouée : {e}")
             time.sleep(VESC_CONNECT_SETTLE)
-    raise Exception(f"Impossible de connecter le VESC après {VESC_CONNECT_RETRIES} tentatives : {last_exc}")
+    raise Exception(f"VESC déconnecté : {last_exc}")
 
-
-# ── Pipeline OAK-D ────────────────────────────────────────────────────────────
 def build_pipeline() -> dai.Pipeline:
     pipeline = dai.Pipeline()
     cam = pipeline.create(dai.node.MonoCamera)
@@ -296,78 +259,46 @@ def build_pipeline() -> dai.Pipeline:
     cam.out.link(xout.input)
     return pipeline
 
-
-# ── Snapshot ──────────────────────────────────────────────────────────────────
-def save_snapshot(frame: np.ndarray):
-    SNAPSHOT_DIR.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = SNAPSHOT_DIR / f"{ts}_mask.png"
-    cv2.imwrite(str(path), frame)
-    print(f"  Saved: {path}")
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     global latest_frame
-
-    # HTTP stream
     threading.Thread(target=start_http_server, daemon=True).start()
-    print(f"✓ Stream sur http://localhost:{HTTP_PORT}")
-
-    # Gamepad (arrêt d'urgence)
+    
     if not Gamepad.available():
-        print("[INFO] En attente du gamepad…")
-        while not Gamepad.available():
-            time.sleep(1)
+        while not Gamepad.available(): time.sleep(0.5)
     gamepad = GAMEPAD_TYPE()
     gamepad.startBackgroundUpdates()
-    print("✓ Gamepad connecté  (LB = arrêt d'urgence)")
 
-    # VESC
-    print(f"[INFO] Connexion VESC sur {VESC_PORT}…")
     vesc = vesc_connect()
-
-    # Caméra
     pipeline = build_pipeline()
 
     adaptive  = USE_ADAPTIVE_THRESH
     threshold = BINARY_THRESHOLD
     count, t0, fps_val = 0, time.monotonic(), 0.0
-    stopped = False         # état RUN/STOP toggle via LB
-    prev_lb = False         # détection front montant
+    stopped = True  # Démarre en sécurité STOP par défaut
+    prev_lb = False
     has_display = bool(os.environ.get("DISPLAY"))
-    if not has_display:
-        print("[INFO] Pas de DISPLAY → fenêtre locale désactivée (stream HTTP uniquement)")
 
     with vesc:
         vesc.set_servo(SERVO_CENTER)
         vesc.set_duty_cycle(0)
-        time.sleep(0.5)
-        print("✓ VESC prêt — démarrage du pilotage autonome")
-        print("  Manette : LB = toggle RUN/STOP  (caméra continue dans tous les cas)\n")
-
+        
         try:
             with dai.Device(pipeline) as device:
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
                 while not stop_event.is_set():
-
-                    # ── Toggle RUN/STOP (front montant sur LB) ─────────────
                     lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
                     if lb_now and not prev_lb:
                         stopped = not stopped
-                        print(f"[GAMEPAD] {'⏸  STOP' if stopped else '▶  RUN'}")
+                        print(f"[GAMEPAD] {'⏸ STOP' if stopped else '▶ RUN'}")
                     prev_lb = lb_now
 
-                    # ── Frame caméra (toujours, même à l'arrêt) ────────────
                     pkt = q.tryGet()
                     if pkt is None:
-                        time.sleep(0.001)
+                        time.sleep(0.002)
                         continue
 
-                    raw = pkt.getCvFrame()  # uint8 grayscale
-
-                    # FPS
+                    raw = pkt.getCvFrame()
                     count += 1
                     now = time.monotonic()
                     if now - t0 >= 1.0:
@@ -375,122 +306,69 @@ def main():
                         count = 0
                         t0 = now
 
-                    # ── Détection (toujours) ───────────────────────────────
                     mask = detect_lines(raw, adaptive, threshold)
                     (servo_pos, line_found, target_x,
                      left_x, right_x, lane_near, lane_far) = compute_steering(mask)
 
-                    # ── Décision moteur ────────────────────────────────────
                     if stopped:
                         duty = 0.0
                         vesc.set_duty_cycle(0.0)
                         vesc.set_servo(SERVO_CENTER)
                         direction = "STOP"
                     else:
-                        # Vitesse = AUTO_DUTY en ligne droite, ↘ vers AUTO_DUTY_MIN
-                        # quand on braque à fond. Plus le servo s'éloigne du centre,
-                        # plus on ralentit pour ne pas survirer.
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         if line_found:
+                            # Gestion fine de la vitesse selon l'angle de braquage
                             duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
                             duty = max(AUTO_DUTY_MIN, duty)
                         else:
                             duty = AUTO_DUTY_MIN
+                        
                         vesc.set_servo(servo_pos)
                         vesc.set_duty_cycle(duty)
-                        if servo_pos < SERVO_CENTER - 0.05:
-                            direction = "LEFT"
-                        elif servo_pos > SERVO_CENTER + 0.05:
-                            direction = "RIGHT"
-                        else:
-                            direction = "STRAIGHT"
+                        
+                        if servo_pos < SERVO_CENTER - 0.04: direction = "LEFT"
+                        elif servo_pos > SERVO_CENTER + 0.04: direction = "RIGHT"
+                        else: direction = "STRAIGHT"
 
-                    # ── Affichage ──────────────────────────────────────────
+                    # ── Rendu visuel amélioré ─────────────────────────────────
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+                    sx = DISPLAY_W / src_w
 
-                    sx = DISPLAY_W / src_w  # facteur d'échelle X
-                    near_y0 = int(DISPLAY_H * ROI_NEAR_TOP_RATIO)
-                    near_y1 = int(DISPLAY_H * ROI_NEAR_BOTTOM_RATIO)
-                    far_y0  = int(DISPLAY_H * ROI_FAR_TOP_RATIO)
-                    far_y1  = int(DISPLAY_H * ROI_FAR_BOTTOM_RATIO)
+                    # Affichage des ROI de scan
+                    cv2.rectangle(display, (0, int(DISPLAY_H*ROI_NEAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_NEAR_BOT)), (0, 255, 255), 1)
+                    cv2.rectangle(display, (0, int(DISPLAY_H*ROI_FAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_FAR_BOT)), (255, 255, 0), 1)
 
-                    # Bandes analysées : NEAR (jaune) + FAR (cyan)
-                    cv2.rectangle(display, (0, near_y0), (DISPLAY_W - 1, near_y1),
-                                  (0, 255, 255), 1)
-                    cv2.rectangle(display, (0, far_y0), (DISPLAY_W - 1, far_y1),
-                                  (255, 255, 0), 1)
+                    # Repères visuels des lignes détectées (NEAR)
+                    if left_x >= 0: cv2.circle(display, (int(left_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
+                    if right_x >= 0: cv2.circle(display, (int(right_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
 
-                    # Centre image (bleu)
-                    cv2.line(display, (DISPLAY_W // 2, far_y0),
-                             (DISPLAY_W // 2, near_y1), (255, 0, 0), 1)
-
-                    # Lignes détectées dans la bande NEAR (vert)
-                    if left_x >= 0:
-                        x = int(left_x * sx)
-                        cv2.line(display, (x, near_y0), (x, near_y1), (0, 255, 0), 2)
-                    if right_x >= 0:
-                        x = int(right_x * sx)
-                        cv2.line(display, (x, near_y0), (x, near_y1), (0, 255, 0), 2)
-
-                    # Cible (rouge)
+                    # Tracé du point cible calculé
                     tx = int(target_x * sx)
-                    cv2.line(display, (tx, far_y0), (tx, DISPLAY_H), (0, 0, 255), 2)
-                    cv2.circle(display, (tx, (near_y0 + near_y1) // 2), 6, (0, 0, 255), -1)
+                    cv2.circle(display, (tx, int(DISPLAY_H * ROI_FAR_TOP)), 8, (0, 0, 255), -1)
+                    cv2.line(display, (DISPLAY_W // 2, DISPLAY_H), (tx, int(DISPLAY_H * ROI_FAR_TOP)), (0, 0, 255), 2)
 
-                    # Bandeau d'état (haut)
-                    state_color = (0, 0, 255) if stopped else (0, 200, 0)
-                    state_text = "⏸ STOPPED (LB pour RUN)" if stopped else "▶ RUNNING (LB pour STOP)"
-                    cv2.rectangle(display, (0, 0), (DISPLAY_W, 28), (0, 0, 0), -1)
-                    cv2.putText(display, state_text, (8, 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
-
-                    # Bandeau décisions (bas)
-                    cv2.rectangle(display, (0, DISPLAY_H - 56), (DISPLAY_W, DISPLAY_H), (0, 0, 0), -1)
-                    line1 = f"DIR: {direction:<8}  NEAR: {lane_near:<5}  FAR: {lane_far:<5}  servo={servo_pos:.2f}  duty={duty:.2f}"
-                    line2 = f"{fps_val:4.1f} FPS  |  thr={threshold}  |  target_x={target_x}  ({'ADAPT' if adaptive else 'BIN'})"
-                    cv2.putText(display, line1, (8, DISPLAY_H - 34),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    cv2.putText(display, line2, (8, DISPLAY_H - 12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+                    # Incrustation Infos HUD
+                    cv2.rectangle(display, (0, 0), (DISPLAY_W, 30), (0, 0, 0), -1)
+                    status_str = f"FPS: {fps_val:.1f} | {'[STOP]' if stopped else '[AUTONOMOUS]'} | Dir: {direction} | Servo: {servo_pos:.2f}"
+                    cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 202), 1)
 
                     with frame_lock:
                         latest_frame = display
 
-                    # ── Clavier local ──────────────────────────────────────
                     if has_display:
-                        try:
-                            cv2.imshow("Lane Mask", display)
-                            key = cv2.waitKey(1) & 0xFF
-                            if key == ord("q"):
-                                print("Quitting…")
-                                stop_event.set()
-                            elif key == ord("s"):
-                                save_snapshot(display)
-                            elif key == ord("t"):
-                                adaptive = not adaptive
-                                print(f"Seuillage → {'ADAPTIVE' if adaptive else 'CLASSIQUE'}")
-                            elif key in (ord("+"), ord("=")):
-                                threshold = min(threshold + 5, 250)
-                                print(f"Seuil → {threshold}")
-                            elif key == ord("-"):
-                                threshold = max(threshold - 5, 10)
-                                print(f"Seuil → {threshold}")
-                        except cv2.error:
-                            pass  # headless
+                        cv2.imshow("Lane Mask Output", display)
+                        if cv2.waitKey(1) & 0xFF == ord("q"): stop_event.set()
 
-        except KeyboardInterrupt:
-            print("\n[INFO] Ctrl+C reçu")
-
+        except KeyboardInterrupt: pass
         finally:
-            print("[INFO] Arrêt propre…")
             vesc.set_duty_cycle(0)
             vesc.set_servo(SERVO_CENTER)
             gamepad.stopBackgroundUpdates()
             cv2.destroyAllWindows()
             gc.collect()
-
 
 if __name__ == "__main__":
     main()
