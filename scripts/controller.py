@@ -24,12 +24,12 @@ SERVO_RANGE    = 0.3
 POLL_INTERVAL = 0.05
 
 def main():
-    print("Robot Car Controller Starting...")
+    print("[INFO] Robot Car Controller Starting...")
     if not Gamepad.available():
-        print("Waiting for gamepad to be connected...")
+        print("[INFO] Waiting for gamepad to be connected...")
         while not Gamepad.available():
             time.sleep(1)
-    print("Gamepad connected.")
+    print("[INFO] Gamepad connected.")
 
 if __name__ == '__main__':
     main()
