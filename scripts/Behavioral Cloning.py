@@ -2,6 +2,7 @@
 """
 Robot Car — Pilotage & Enregistrement pour Entraînement IA (Behavioral Cloning)
 Plateforme : Jetson Nano 4Go (Optimisé RAM & Stockage via Masque Binaire)
+Version corrigée pour la bibliothèque Gamepad
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ DISPLAY_H = 480
 CAM_FPS   = 60
 HTTP_PORT = 5000
 
-# Rognage horizon & Seuil ultra-binaire
+# ✂️ Rognage horizon & Seuil ultra-binaire
 CROP_TOP_RATIO      = 0.40  
 ULTRA_BINARY_THRESH = 220  
 
@@ -190,7 +191,6 @@ def init_dataset():
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     file_exists = CSV_FILE.exists()
     
-    # Ouverture en mode "append" pour pouvoir cumuler les sessions de conduite
     csv_file_handle = open(CSV_FILE, mode="a", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file_handle)
     
@@ -265,7 +265,7 @@ def build_pipeline() -> dai.Pipeline:
     return pipeline
 
 
-# ── Boucle Principale ─────────────────────────────────────────────────────────
+# ── Boucle Principale de Contrôle ─────────────────────────────────────────────
 
 def main():
     global latest_frame, is_recording, csv_writer, csv_file_handle
@@ -299,19 +299,18 @@ def main():
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
                 while not stop_event.is_set():
-                    # 🕹️ Gestion des inputs Manette
+                    # 🕹️ Gestion des bascules de boutons
                     lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
                     a_now  = gamepad.isConnected() and gamepad.isPressed("A")
                     
-                    # Commutateur Mode Autonome / Manuel
                     if lb_now and not prev_lb:
                         autonomous_mode = not autonomous_mode
                         if autonomous_mode:
-                            is_recording = False # Pas de rec en mode autonome
+                            with record_lock:
+                                is_recording = False
                         print(f"[MODE] {'🏎️ AUTONOME GÉOMÉTRIQUE' if autonomous_mode else '🎮 CONDUITE MANUELLE'}")
                     prev_lb = lb_now
 
-                    # Commutateur Enregistrement Dataset (Seulement si manuel)
                     if a_now and not prev_a and not autonomous_mode:
                         with record_lock:
                             is_recording = not is_recording
@@ -324,6 +323,7 @@ def main():
                         continue
 
                     raw = pkt.getCvFrame()
+                    h, w = raw.shape
                     count += 1
                     now = time.monotonic()
                     if now - t0 >= 1.0:
@@ -331,48 +331,52 @@ def main():
                         count = 0
                         t0 = now
 
-                    # Vision : Génération du masque binaire
+                    # Traitement de la vision (Masque épuré)
                     mask = detect_lines(raw)
 
-                    # Calcul de la direction selon le mode
+                    # Choix de la commande de pilotage
                     if autonomous_mode:
-                        # Calcul Géométrique classique
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         duty = max(AUTO_DUTY_MIN, AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)) if line_found else AUTO_DUTY_MIN
                     else:
-                        # Mode Manuel : Lecture directe de la manette
-                        # Joystick gauche pour le servo
-                        steer_input = gamepad.getAxis("X")  # Renvoie entre -1.0 et 1.0
+                        # ── 🕹️ Lecture Directe Manette (Version Variable) ──
+                        try:
+                            # Tentative de lecture via l'attribut standard .joystickX de Gamepad
+                            steer_input = gamepad.joystickX if hasattr(gamepad, 'joystickX') else 0.0
+                        except AttributeError:
+                            steer_input = 0.0
+                        
                         servo_pos = SERVO_CENTER + (steer_input * SERVO_RANGE)
                         servo_pos = max(0.0, min(1.0, servo_pos))
                         
-                        # Gâchette droite (RT) pour l'accélérateur manuel (bridé à AUTO_DUTY max)
-                        gas_input = gamepad.getAxis("RT")  # Renvoie entre 0.0 et 1.0
+                        try:
+                            # Gâchette droite pour l'accélération
+                            gas_input = gamepad.triggerR if hasattr(gamepad, 'triggerR') else 0.0
+                        except AttributeError:
+                            gas_input = 0.0
+                            
                         duty = gas_input * AUTO_DUTY
-                        
-                        # Pas de repères géométriques calculés à afficher en manuel
-                        target_x, left_x, right_x = w // 2 if 'w' in locals() else 320, -1, -1
+                        target_x, left_x, right_x = w // 2, -1, -1
 
-                    # Application des commandes physiques au VESC
+                    # Application VESC
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    # 💾 ENREGISTREMENT SUR LA JETSON NANO (Option 1)
-                    if is_recording and duty > 0.005:  # On n'enregistre pas si le kart est immobile
+                    # 💾 Sauvegarde asynchrone des masques pour le dataset
+                    if is_recording and duty > 0.005:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
                         
-                        # Sauvegarde asynchrone pour ne pas ralentir la boucle principale (Crucial Jetson Nano)
+                        # Thread séparé pour éviter les chutes de FPS sur Jetson Nano
                         threading.Thread(target=cv2.imwrite, args=(str(img_path), mask)).start()
                         
-                        # Écriture dans le log CSV
                         with record_lock:
                             csv_writer.writerow([f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"])
                             csv_file_handle.flush()
 
-                    # ── Rendu Visuel HUD Réadapté ─────────────────────────────
+                    # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
@@ -387,7 +391,6 @@ def main():
                         cv2.circle(display, (tx, int(DISPLAY_H * ROI_FAR_TOP)), 8, (0, 0, 255), -1)
                         cv2.line(display, (DISPLAY_W // 2, DISPLAY_H), (tx, int(DISPLAY_H * ROI_FAR_TOP)), (0, 0, 255), 2)
 
-                    # Barre HUD de statut
                     cv2.rectangle(display, (0, 0), (DISPLAY_W, 30), (0, 0, 0), -1)
                     mode_str = "[AUTO]" if autonomous_mode else "[MANUAL]"
                     rec_str = " | 🔴 REC" if is_recording else ""
