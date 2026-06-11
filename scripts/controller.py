@@ -14,6 +14,10 @@ AXIS_FORWARD = "RIGHT-TRIGGER"
 AXIS_BACKWARD = "LEFT-TRIGGER"
 AXIS_STEERING  = 'RIGHT-X'
 
+VESC_PORT     = '/dev/ttyACM0'
+VESC_BAUDRATE = 115200
+VESC_TIMEOUT  = 1.0
+
 # To prevent when device is in use or locked
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0 
@@ -33,6 +37,8 @@ def main():
 
     gamepad = GAMEPAD_TYPE()
     gamepad.startBackgroundUpdates()
+
+    print(f'[INFO] Connexion VESC sur {VESC_PORT}...')
 
 if __name__ == '__main__':
     main()
