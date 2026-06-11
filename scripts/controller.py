@@ -93,10 +93,17 @@ def main():
                     servo_pos = axis_to_servo(steering_raw, False)
                     vesc.set_duty_cycle(duty)
                     vesc.set_servo(servo_pos)
+                    time.sleep(POLL_INTERVAL)
 
-            except Exception as e:
-                print(f'[ERROR] Error reading gamepad axes: {e}')
-                return
+            except KeyboardInterrupt:
+                print('\n[INFO] Keyboard interrupt received, stopping the robot...')
+            
+            finally:
+                print('[INFO] Stopping the robot and cleaning up...')
+                vesc.set_duty_cycle(0)
+                vesc.set_servo(SERVO_CENTER)
+                gamepad.stopBackgroundUpdates()
+                gc.collect() # force garbage collection to free resources
 
     except Exception as e:
         print(f'[ERROR] Error occurred while connecting to VESC: {e}')
