@@ -13,3 +13,18 @@ GAMEPAD_TYPE = Gamepad.Xbox360 # Logitech F710 has two modes, and the mode X sim
 AXIS_FORWARD = "RIGHT-TRIGGER"
 AXIS_BACKWARD = "LEFT-TRIGGER"
 AXIS_STEERING  = 'RIGHT-X'
+
+# To prevent when device is in use or locked
+VESC_CONNECT_RETRIES = 8
+VESC_CONNECT_SETTLE  = 1.0 
+
+MAX_DUTY_CYCLE = 0.3 # can be changed
+SERVO_CENTER   = 0.5
+SERVO_RANGE    = 0.3
+POLL_INTERVAL = 0.05
+
+def main():
+    print("Robot Car Controller Starting...")
+
+if __name__ == '__main__':
+    main()
