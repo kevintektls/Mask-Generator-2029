@@ -29,6 +29,19 @@ SERVO_CENTER   = 0.5
 SERVO_RANGE    = 0.3
 POLL_INTERVAL = 0.05
 
+def my_vesc_connect():
+    last_exception = None
+    for attempt in range(VESC_CONNECT_RETRIES):
+        try:
+            vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
+            print(f'[INFO] Successfully connected to VESC on attempt {attempt + 1}')
+            return vesc
+        except Exception as e:
+            last_exception = e
+            print(f'[WARNING] Attempt {attempt + 1} failed: {e}')
+            time.sleep(VESC_CONNECT_SETTLE)
+    raise Exception(f'Failed to connect to VESC after {VESC_CONNECT_RETRIES} attempts: {last_exception}')
+
 def main():
     print("[INFO] Robot Car Controller Starting...")
     if not Gamepad.available():
@@ -41,6 +54,11 @@ def main():
     gamepad.startBackgroundUpdates()
 
     print(f'[INFO] Connexion VESC sur {VESC_PORT}...')
+    try:
+        vesc = my_vesc_connect()
+    except Exception as e:
+        print(f'[ERROR] Erreur lors de la connexion au VESC: {e}')
+        return
 
 if __name__ == '__main__':
     main()
