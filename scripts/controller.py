@@ -53,9 +53,16 @@ def main():
     gamepad = GAMEPAD_TYPE()
     gamepad.startBackgroundUpdates()
 
-    print(f'[INFO] Connexion VESC sur {VESC_PORT}...')
+    print(f'[INFO] Connecting to VESC on port {VESC_PORT} with baudrate {VESC_BAUDRATE}...')
     try:
         vesc = my_vesc_connect()
+        with vesc:
+            time.sleep(0.5)
+            print(f'[INFO] Starting, press START button to exit.')
+
+    except Exception as e:
+        print(f'[ERROR] Error occurred while connecting to VESC: {e}')
+        return
     except Exception as e:
         print(f'[ERROR] Erreur lors de la connexion au VESC: {e}')
         return
