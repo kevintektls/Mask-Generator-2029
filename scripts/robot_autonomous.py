@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Robot Car — Pilotage autonome par détection de lignes
-Optimisation : Égalisation locale de contraste (CLAHE) + Verrou de virage serré
+Version : Masque Ultra-Binaire avec rognage strict de l'arrière-plan
 """
 
 from __future__ import annotations
@@ -49,17 +49,23 @@ DISPLAY_H = 480
 CAM_FPS   = 60
 HTTP_PORT = 5000
 
-# Découpage des zones de vision (Ratios verticaux)
-ROI_FAR_TOP     = 0.48
-ROI_FAR_BOT     = 0.65
-ROI_NEAR_TOP    = 0.68
+# ✂️ Rognage de l'horizon (Pour éliminer complètement les murs et faux positifs du haut)
+# On ignore les premiers 40% du haut de l'image de la caméra.
+CROP_TOP_RATIO = 0.40  
+
+# 🎚️ Seuil Ultra-Binaire Manuel Fixe (Modifiable si besoin)
+ULTRA_BINARY_THRESH = 220  
+
+# Découpage des zones de vision internes (Ratios par rapport à l'image rognée)
+ROI_FAR_TOP     = 0.15
+ROI_FAR_BOT     = 0.45
+ROI_NEAR_TOP    = 0.50
 ROI_NEAR_BOT    = 0.85
 
 LANE_WIDTH_PX    = 340  
 LANE_WIDTH_MIN   = 160
 
 # Paramètre de mémoire (Lissage temporel du servo)
-# Évite les mouvements brusques en ligne droite sans brider les virages
 SMOOTHING_ALPHA = 0.25  
 
 # VESC
@@ -73,9 +79,9 @@ VESC_CONNECT_SETTLE  = 1.0
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 
-AUTO_DUTY       = 0.045  # Vitesse en ligne droite (basse pour maîtriser le kart)
-AUTO_DUTY_MIN   = 0.010  # Vitesse plancher en virage serré (laisse enrouler sans pousser dehors)
-TURN_SLOWDOWN   = 0.90   # Coupe jusqu'à 90% de la puissance au braquage max
+AUTO_DUTY       = 0.045  
+AUTO_DUTY_MIN   = 0.010  
+TURN_SLOWDOWN   = 0.90   
 
 GAMEPAD_TYPE    = Gamepad.Xbox360
 
@@ -84,33 +90,35 @@ GAMEPAD_TYPE    = Gamepad.Xbox360
 prev_servo_pos = SERVO_CENTER
 
 
-# ── Nouvel Algorithme de Vision Anti-Reflets & Lumière ────────────────────────
+# ── Algorithme de Vision Ultra-Binaire Épuré ─────────────────────────────────
 
 def detect_lines(frame_gray: np.ndarray, *args, **kwargs) -> np.ndarray:
     """
-    Algorithme robuste : Égalisation CLAHE + Seuillage dynamique.
-    Idéal pour détacher des lignes blanches sur sol noir malgré les variations lumineuses.
+    Masque ultra-épuré : Rognage de l'horizon parasite + Seuil fixe agressif.
     """
-    # 1. Flou bilatéral pour lisser le grain de la route en gardant les bords nets
-    blurred = cv2.bilateralFilter(frame_gray, 5, 45, 45)
+    h, w = frame_gray.shape
     
-    # 2. CLAHE : Égalise le contraste par blocs locaux. Supprime l'effet "tout blanc"
-    # dû à un spot de lumière ou un reflet de néon sur le sol.
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    equalized = clahe.apply(blurred)
+    # 1. On crée un masque noir de la taille de l'image
+    clean_mask = np.zeros_like(frame_gray)
     
-    # 3. Seuillage automatique par la méthode d'Otsu 
-    # Calcule dynamiquement le meilleur seuil entre le sol noir et la ligne blanche
-    _, mask = cv2.threshold(equalized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # 2. On définit la zone utile (uniquement le sol)
+    start_y = int(h * CROP_TOP_RATIO)
+    roi_sol = frame_gray[start_y:h, :]
     
-    # 4. Nettoyage morphologique pour connecter les lignes et effacer les poussières
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    # 3. Flou léger pour enlever le grain
+    blurred = cv2.GaussianBlur(roi_sol, (5, 5), 0)
     
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   # Supprime les bruits blancs isolés
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # Soude les morceaux de ligne coupés
+    # 4. Seuillage fixe très haut pour ne garder que le blanc pur des lignes
+    _, binary_sol = cv2.threshold(blurred, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
     
-    return mask
+    # 5. On réinjecte la zone propre dans notre masque final
+    clean_mask[start_y:h, :] = binary_sol
+    
+    # 6. Nettoyage morphologique rapide
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel)
+    
+    return clean_mask
 
 
 def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
@@ -171,12 +179,9 @@ def compute_steering(mask: np.ndarray):
         far_error = abs(target_far - mid) / mid
         near_error = abs(target_near - mid) / mid
         
-        # Si un virage important est détecté (Otsu / Horizon excentré)
         if far_error > 0.30 or near_error > 0.30:
-            # On prend la cible la plus engagée dans le virage pour ne pas redresser
             target = target_far if far_error > near_error else target_near
         else:
-            # Ligne droite : stabilité maximale (60% NEAR / 40% FAR)
             target = (0.60 * target_near) + (0.40 * target_far)
             
     elif target_far is not None:
@@ -198,9 +203,9 @@ def compute_steering(mask: np.ndarray):
     
     # ── 4. Mémoire Asymétrique (Interdiction du sursaut directionnel) ─────────
     if abs(raw_servo_pos - SERVO_CENTER) > abs(prev_servo_pos - SERVO_CENTER):
-        alpha = 0.45  # On autorise à braquer très vite s'il le faut
+        alpha = 0.45  
     else:
-        alpha = 0.12  # On filtre fortement le redressement pour stabiliser la courbe
+        alpha = 0.12  
 
     actual_servo = (1.0 - alpha) * prev_servo_pos + alpha * raw_servo_pos
     actual_servo = max(0.0, min(1.0, actual_servo))
@@ -290,7 +295,7 @@ def main():
     pipeline = build_pipeline()
 
     count, t0, fps_val = 0, time.monotonic(), 0.0
-    stopped = True  # Sécurité : démarre impérativement à l'arrêt
+    stopped = True  
     prev_lb = False
     has_display = bool(os.environ.get("DISPLAY"))
 
@@ -305,7 +310,6 @@ def main():
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
                 while not stop_event.is_set():
-                    # Gestion de l'interrupteur LB
                     lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
                     if lb_now and not prev_lb:
                         stopped = not stopped
@@ -325,7 +329,7 @@ def main():
                         count = 0
                         t0 = now
 
-                    # Vision & Calcul Trajectoire
+                    # Vision & Calcul Trajectoire (Masque épuré)
                     mask = detect_lines(raw, False, 0)
                     (servo_pos, line_found, target_x,
                      left_x, right_x, lane_near, lane_far) = compute_steering(mask)
@@ -336,7 +340,6 @@ def main():
                         vesc.set_servo(SERVO_CENTER)
                         direction = "STOP"
                     else:
-                        # Adaptation dynamique de la vitesse (Ralentissement en courbe)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         if line_found:
                             duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
@@ -356,6 +359,9 @@ def main():
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
                     sx = DISPLAY_W / src_w
+
+                    # Ligne de démarcation du rognage de l'horizon (Rouge fine)
+                    cv2.line(display, (0, int(DISPLAY_H*CROP_TOP_RATIO)), (DISPLAY_W, int(DISPLAY_H*CROP_TOP_RATIO)), (0, 0, 150), 1)
 
                     # Affichage des boîtes de scan (NEAR=Jaune, FAR=Cyan)
                     cv2.rectangle(display, (0, int(DISPLAY_H*ROI_NEAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_NEAR_BOT)), (0, 255, 255), 1)
