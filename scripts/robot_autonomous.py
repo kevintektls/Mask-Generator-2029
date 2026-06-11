@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Robot Car — Pilotage autonome optimisé
-Amélioration : Traitement par sous-bandes, lissage de masque et anticipation géométrique.
+Version : Anti-décrochage avec priorité à l'horizon en virage serré.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ HTTP_PORT = 5000
 
 # Détection de lignes
 USE_ADAPTIVE_THRESH = False
-BINARY_THRESHOLD    = 170  # Légèrement baissé pour mieux capter les lignes lointaines
+BINARY_THRESHOLD    = 170  
 
 # Découpage des zones de vision (Ratios verticaux)
 ROI_FAR_TOP     = 0.50
@@ -59,8 +59,8 @@ ROI_FAR_BOT     = 0.68
 ROI_NEAR_TOP    = 0.65
 ROI_NEAR_BOT    = 0.82
 
-LOOKAHEAD_WEIGHT = 0.75  # Augmenté : donne plus d'importance à l'horizon (anticipation)
-LANE_WIDTH_PX    = 340  # Largeur par défaut estimée de la voie à l'écran
+LOOKAHEAD_WEIGHT = 0.75  # Importance accordée à l'horizon en ligne droite / courbe légère
+LANE_WIDTH_PX    = 340  
 LANE_WIDTH_MIN   = 160
 
 # VESC
@@ -72,10 +72,10 @@ VESC_CONNECT_SETTLE  = 1.0
 
 # Pilotage
 SERVO_CENTER    = 0.5
-SERVO_RANGE     = 0.48   # Réduit légèrement pour éviter les coups de volant trop violents
-AUTO_DUTY       = 0.07   # Vitesse de croisière sûre pour les tests
-AUTO_DUTY_MIN   = 0.045  # Vitesse plancher en gros virage
-TURN_SLOWDOWN   = 0.60   # Ralentissement progressif en courbe
+SERVO_RANGE     = 0.48   
+AUTO_DUTY       = 0.07   
+AUTO_DUTY_MIN   = 0.045  
+TURN_SLOWDOWN   = 0.60   
 
 GAMEPAD_TYPE    = Gamepad.Xbox360
 SNAPSHOT_DIR    = Path("snapshots")
@@ -85,7 +85,6 @@ SNAPSHOT_DIR    = Path("snapshots")
 
 def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.ndarray:
     """Génère un masque binaire nettoyé des bruits de route."""
-    # Flou bilatéral pour lisser la route tout en préservant les bords nets des lignes
     blurred = cv2.bilateralFilter(frame_gray, 7, 50, 50)
     
     if adaptive:
@@ -96,52 +95,42 @@ def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.n
     else:
         _, mask = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)
     
-    # Nettoyage morphologique évolué
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   # Supprime les petits bruits blancs
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) # Comble les trous dans les lignes blanches
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) 
     
     return mask
 
 
 def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
-    """
-    Analyse une zone en moyennant plusieurs micro-lignes horizontales.
-    Évite les faux positifs des virages serrés.
-    """
+    """Analyse une zone en moyennant l'histogramme horizontal."""
     h, w = mask.shape
     mid = w // 2
     band = mask[y_top:y_bot, :]
     
-    # Histogramme vertical de la bande
     hist = np.sum(band > 0, axis=0).astype(np.float32)
     if np.max(hist) == 0:
         return None, -1, -1, "NONE"
     
-    # Lissage de l'histogramme
     hist = np.convolve(hist, np.ones(21, dtype=np.float32) / 21, mode="same")
-    threshold = (y_bot - y_top) * 0.20  # Au moins 20% de pixels blancs sur la colonne
+    threshold = (y_bot - y_top) * 0.20  
     
-    # Recherche à gauche et à droite du centre
     left_hits = np.where(hist[:mid][::-1] >= threshold)[0]
     left_x = (mid - 1 - int(left_hits[0])) if left_hits.size else -1
 
     right_hits = np.where(hist[mid:] >= threshold)[0]
     right_x = (mid + int(right_hits[0])) if right_hits.size else -1
 
-    # Cohérence de la largeur de la voie
     if left_x >= 0 and right_x >= 0:
         actual_width = right_x - left_x
         if actual_width < LANE_WIDTH_MIN:
-            # On élimine le pic le plus faible
             if hist[left_x] >= hist[right_x]:
                 right_x = -1
             else:
                 left_x = -1
 
-    # Décision de trajectoire centrée
     if left_x >= 0 and right_x >= 0:
         return (left_x + right_x) / 2.0, left_x, right_x, "BOTH"
     elif left_x >= 0:
@@ -153,11 +142,10 @@ def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | 
 
 
 def compute_steering(mask: np.ndarray):
-    """Calcule l'ordre du servo avec une forte pondération sur l'horizon (anticipation)."""
+    """Calcule l'ordre servo avec verrouillage de l'horizon en courbe serrée."""
     h, w = mask.shape
     mid = w // 2
 
-    # Coordonnées des zones
     n_top, n_bot = int(h * ROI_NEAR_TOP), int(h * ROI_NEAR_BOT)
     f_top, f_bot = int(h * ROI_FAR_TOP), int(h * ROI_FAR_BOT)
 
@@ -167,19 +155,26 @@ def compute_steering(mask: np.ndarray):
     if target_near is None and target_far is None:
         return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
 
-    # Fusion des cibles avec le poids d'anticipation
+    # ── Nouvelle Logique de Fusion Anti-Décrochage ──────────────────────────
     if target_near is not None and target_far is not None:
-        target = (1.0 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
+        # Écart relatif de la cible lointaine par rapport au centre de l'image
+        far_error = abs(target_far - mid) / (w / 2.0)
+        
+        if far_error > 0.35:  # 35% d'excentration = virage prononcé validé
+            target = target_far  # Priorité totale à l'anticipation pour ne pas se redresser
+        else:
+            # En ligne droite ou courbe légère, on applique la pondération configurée
+            target = (1.0 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
+            
     elif target_far is not None:
-        target = target_far  # On fait confiance au loin si le près est perdu
+        target = target_far
     else:
         target = target_near
 
-    # Calcul de l'erreur normalisée (-1.0 à 1.0)
+    # Calcul de l'erreur finale normalisée (-1.0 à 1.0)
     error = (target - mid) / (w / 2.0)
     
-    # Amortissement exponentiel doux pour éviter les comportements brusques près du centre
-    # Conserve la réactivité lors des grands écarts
+    # Amortissement progressif autour du centre, direct en virage
     sign = 1.0 if error >= 0 else -1.0
     error_smoothed = sign * (abs(error) ** 1.2)
 
@@ -189,7 +184,7 @@ def compute_steering(mask: np.ndarray):
     return servo, True, int(target), left_x, right_x, status_near, status_far
 
 
-# ── Reste de l'architecture inchangée mais optimisée ──────────────────────────
+# ── Architecture Système & Serveur Stream ─────────────────────────────────────
 latest_frame: np.ndarray | None = None
 frame_lock = threading.Lock()
 stop_event = threading.Event()
@@ -244,7 +239,7 @@ def vesc_connect() -> VESC:
         except Exception as e:
             last_exc = e
             time.sleep(VESC_CONNECT_SETTLE)
-    raise Exception(f"VESC déconnecté : {last_exc}")
+    raise Exception(f"VESC introuvable : {last_exc}")
 
 def build_pipeline() -> dai.Pipeline:
     pipeline = dai.Pipeline()
@@ -274,7 +269,7 @@ def main():
     adaptive  = USE_ADAPTIVE_THRESH
     threshold = BINARY_THRESHOLD
     count, t0, fps_val = 0, time.monotonic(), 0.0
-    stopped = True  # Démarre en sécurité STOP par défaut
+    stopped = True  
     prev_lb = False
     has_display = bool(os.environ.get("DISPLAY"))
 
@@ -318,7 +313,6 @@ def main():
                     else:
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         if line_found:
-                            # Gestion fine de la vitesse selon l'angle de braquage
                             duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
                             duty = max(AUTO_DUTY_MIN, duty)
                         else:
@@ -331,26 +325,22 @@ def main():
                         elif servo_pos > SERVO_CENTER + 0.04: direction = "RIGHT"
                         else: direction = "STRAIGHT"
 
-                    # ── Rendu visuel amélioré ─────────────────────────────────
+                    # ── Rendu Visuel avec Cible Flottante ─────────────────────
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
                     sx = DISPLAY_W / src_w
 
-                    # Affichage des ROI de scan
                     cv2.rectangle(display, (0, int(DISPLAY_H*ROI_NEAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_NEAR_BOT)), (0, 255, 255), 1)
                     cv2.rectangle(display, (0, int(DISPLAY_H*ROI_FAR_TOP)), (DISPLAY_W, int(DISPLAY_H*ROI_FAR_BOT)), (255, 255, 0), 1)
 
-                    # Repères visuels des lignes détectées (NEAR)
                     if left_x >= 0: cv2.circle(display, (int(left_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
                     if right_x >= 0: cv2.circle(display, (int(right_x*sx), int(DISPLAY_H*ROI_NEAR_TOP)), 5, (0, 255, 0), -1)
 
-                    # Tracé du point cible calculé
                     tx = int(target_x * sx)
                     cv2.circle(display, (tx, int(DISPLAY_H * ROI_FAR_TOP)), 8, (0, 0, 255), -1)
                     cv2.line(display, (DISPLAY_W // 2, DISPLAY_H), (tx, int(DISPLAY_H * ROI_FAR_TOP)), (0, 0, 255), 2)
 
-                    # Incrustation Infos HUD
                     cv2.rectangle(display, (0, 0), (DISPLAY_W, 30), (0, 0, 0), -1)
                     status_str = f"FPS: {fps_val:.1f} | {'[STOP]' if stopped else '[AUTONOMOUS]'} | Dir: {direction} | Servo: {servo_pos:.2f}"
                     cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 202), 1)
