@@ -59,6 +59,7 @@ def main():
         with vesc:
             time.sleep(0.5)
             print(f'[INFO] Starting, press START button to exit.')
+            print(f'[WARNING] Duty cycle is limited to {MAX_DUTY_CYCLE * 100:.1f}% for safety.')
 
     except Exception as e:
         print(f'[ERROR] Error occurred while connecting to VESC: {e}')
