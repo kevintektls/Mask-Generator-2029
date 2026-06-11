@@ -31,5 +31,8 @@ def main():
             time.sleep(1)
     print("[INFO] Gamepad connected.")
 
+    gamepad = GAMEPAD_TYPE()
+    gamepad.startBackgroundUpdates()
+
 if __name__ == '__main__':
     main()
