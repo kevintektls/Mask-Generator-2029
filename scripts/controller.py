@@ -44,6 +44,10 @@ def triggers_to_duty(forward_raw, backward_raw):
     throttle = apply_deadzone(throttle)
     return clamp(throttle * MAX_DUTY_CYCLE, -MAX_DUTY_CYCLE, MAX_DUTY_CYCLE)
 
+def axis_to_servo(axis_value, inverted=False):
+    v = apply_deadzone(-axis_value if inverted else axis_value)
+    return clamp(SERVO_CENTER + v * SERVO_RANGE, 0.0, 1.0)
+
 def my_vesc_connect():
     last_exception = None
     for attempt in range(VESC_CONNECT_RETRIES):
@@ -85,6 +89,10 @@ def main():
                     duty = triggers_to_duty(forward_raw, backward_raw)
                     if gamepad.isPressed("LB"):
                         duty *= SLOW_FACTOR
+
+                    servo_pos = axis_to_servo(steering_raw, False)
+                    vesc.set_duty_cycle(duty)
+                    vesc.set_servo(servo_pos)
 
             except Exception as e:
                 print(f'[ERROR] Error reading gamepad axes: {e}')
