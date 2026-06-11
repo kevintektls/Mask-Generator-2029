@@ -2,7 +2,7 @@
 """
 Robot Car — Pilotage & Enregistrement pour Entraînement IA (Behavioral Cloning)
 Plateforme : Jetson Nano 4Go (Optimisé RAM & Stockage via Masque Binaire)
-Version corrigée pour la bibliothèque Gamepad
+Version corrigée : Mapping Manuel Manette Alternatif
 """
 
 from __future__ import annotations
@@ -299,7 +299,6 @@ def main():
                 q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
 
                 while not stop_event.is_set():
-                    # 🕹️ Gestion des bascules de boutons
                     lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
                     a_now  = gamepad.isConnected() and gamepad.isPressed("A")
                     
@@ -331,52 +330,54 @@ def main():
                         count = 0
                         t0 = now
 
-                    # Traitement de la vision (Masque épuré)
                     mask = detect_lines(raw)
 
-                    # Choix de la commande de pilotage
                     if autonomous_mode:
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         duty = max(AUTO_DUTY_MIN, AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)) if line_found else AUTO_DUTY_MIN
                     else:
-                        # ── 🕹️ Lecture Directe Manette (Version Variable) ──
-                        try:
-                            # Tentative de lecture via l'attribut standard .joystickX de Gamepad
-                            steer_input = gamepad.joystickX if hasattr(gamepad, 'joystickX') else 0.0
-                        except AttributeError:
-                            steer_input = 0.0
+                        # ── 🕹️ Lecture Robuste via Dictionnaire Interne de la Lib ──
+                        steer_input = 0.0
+                        gas_input = 0.0
                         
+                        if hasattr(gamepad, '_getAxis'):
+                            # Essai avec la méthode interne brute de l'API
+                            steer_input = gamepad._getAxis(0) # Généralement l'axe X du stick gauche
+                            gas_input = gamepad._getAxis(5)  # Généralement l'axe RT
+                        elif hasattr(gamepad, 'axisNames'):
+                            # Fallback si les axes sont mappés en chaînes brutes dans l'instance
+                            for name in gamepad.axisNames:
+                                if "X" in name or "STICK" in name: steer_input = getattr(gamepad, name, 0.0)
+                                if "TR" in name or "RT" in name: gas_input = getattr(gamepad, name, 0.0)
+                        
+                        # Si l'API renvoie des valeurs entre 0 et 255 au lieu de 0.0/1.0 pour la gâchette
+                        if abs(gas_input) > 1.0: gas_input = gas_input / 255.0
+                        if abs(steer_input) > 1.0: steer_input = steer_input / 255.0
+
                         servo_pos = SERVO_CENTER + (steer_input * SERVO_RANGE)
                         servo_pos = max(0.0, min(1.0, servo_pos))
                         
-                        try:
-                            # Gâchette droite pour l'accélération
-                            gas_input = gamepad.triggerR if hasattr(gamepad, 'triggerR') else 0.0
-                        except AttributeError:
-                            gas_input = 0.0
-                            
-                        duty = gas_input * AUTO_DUTY
+                        duty = abs(gas_input) * AUTO_DUTY
                         target_x, left_x, right_x = w // 2, -1, -1
 
                     # Application VESC
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    # 💾 Sauvegarde asynchrone des masques pour le dataset
+                    # Sauvegarde
                     if is_recording and duty > 0.005:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
                         
-                        # Thread séparé pour éviter les chutes de FPS sur Jetson Nano
                         threading.Thread(target=cv2.imwrite, args=(str(img_path), mask)).start()
                         
                         with record_lock:
                             csv_writer.writerow([f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"])
                             csv_file_handle.flush()
 
-                    # ── Rendu Visuel HUD ──────────────────────────────────────
+                    # HUD
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
