@@ -103,14 +103,13 @@ def main():
                 vesc.set_duty_cycle(0)
                 vesc.set_servo(SERVO_CENTER)
                 gamepad.stopBackgroundUpdates()
-                gc.collect() # force garbage collection to free resources
+                gc.collect()
 
     except Exception as e:
         print(f'[ERROR] Error occurred while connecting to VESC: {e}')
         return
-    except Exception as e:
-        print(f'[ERROR] Erreur lors de la connexion au VESC: {e}')
-        return
+    finally:
+        gamepad.stopBackgroundUpdates()
 
 if __name__ == '__main__':
     main()
