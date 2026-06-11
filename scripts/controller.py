@@ -14,6 +14,8 @@ AXIS_FORWARD = "RIGHT-TRIGGER"
 AXIS_BACKWARD = "LEFT-TRIGGER"
 AXIS_STEERING  = 'RIGHT-X'
 
+DEADZONE = 0.08 # to prevent of micro movements of the joystick, can be changed
+
 VESC_PORT     = '/dev/ttyACM0'
 VESC_BAUDRATE = 115200
 VESC_TIMEOUT  = 1.0
