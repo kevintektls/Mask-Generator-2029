@@ -75,15 +75,18 @@ HTTP_PORT = 5000
 # Détection de lignes
 USE_ADAPTIVE_THRESH = False
 BINARY_THRESHOLD    = 180
-# ROI : bande étroite juste devant la voiture (on ignore l'horizon qui est bruité)
-ROI_TOP_RATIO    = 0.78
-ROI_BOTTOM_RATIO = 0.98
+# Deux bandes : NEAR = juste devant la voiture (correction immédiate)
+#               FAR  = plus loin sur la route (anticipation des virages)
+ROI_NEAR_TOP_RATIO    = 0.78
+ROI_NEAR_BOTTOM_RATIO = 0.98
+ROI_FAR_TOP_RATIO     = 0.52
+ROI_FAR_BOTTOM_RATIO  = 0.70
+# Poids de la bande lointaine dans la cible finale (0 = aucun, 1 = uniquement le futur)
+LOOKAHEAD_WEIGHT = 0.4
 # Largeur typique de voie en pixels (utilisée quand on ne voit qu'une seule ligne)
 LANE_WIDTH_PX = 320
-# Tolérance autour de LANE_WIDTH_PX : si l'écart entre les 2 pics est hors [min,max],
-# on retombe en mode "une seule ligne" (plus robuste face au bruit)
+# Si l'écart entre les 2 pics est trop faible, on retombe en mode "une seule ligne"
 LANE_WIDTH_MIN = 180
-LANE_WIDTH_MAX = 520
 
 # VESC
 VESC_PORT            = '/dev/ttyACM0'
@@ -125,45 +128,30 @@ def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.n
     return mask
 
 
-def compute_steering(mask: np.ndarray):
+def _scan_band(mask: np.ndarray, top_ratio: float, bot_ratio: float):
     """
-    Reste ENTRE deux lignes blanches sur fond noir.
-
-    Algo :
-      1. Bande étroite devant la voiture → histogramme par colonne.
-      2. On part du centre image et on scanne vers l'extérieur de chaque côté.
-         La PREMIÈRE colonne franchissant le seuil = frontière de la voie.
-         Tout ce qu'il y a au-delà (bruit, horizon, autres lignes) est ignoré.
-      3. Cible = milieu entre les deux frontières.
-      4. Si une seule vue : on suppose l'autre à LANE_WIDTH_PX.
-
-    Retourne (servo, found, target_x, left_x, right_x, lane_status)
-      lane_status ∈ {"BOTH", "LEFT", "RIGHT", "NONE"}
+    Scanne une bande horizontale et retourne (target_x, left_x, right_x, status).
+    Cherche les 2 lignes blanches en partant du centre vers l'extérieur.
     """
     h, w = mask.shape
-    y0 = int(h * ROI_TOP_RATIO)
-    y1 = int(h * ROI_BOTTOM_RATIO)
+    y0 = int(h * top_ratio)
+    y1 = int(h * bot_ratio)
     band = mask[y0:y1, :]
     band_h = max(1, y1 - y0)
 
-    # Histogramme par colonne, lissé pour gommer les spikes
     hist = np.sum(band > 0, axis=0).astype(np.float32)
     k = 15
     hist = np.convolve(hist, np.ones(k, dtype=np.float32) / k, mode="same")
 
     mid = w // 2
-    # Seuil : une vraie ligne remplit au moins 25 % de la hauteur de la bande
     threshold = band_h * 0.25
 
-    # Scan depuis le centre vers la gauche → 1ère colonne au-dessus du seuil
     left_hits = np.where(hist[:mid][::-1] >= threshold)[0]
     left_x = (mid - 1 - int(left_hits[0])) if left_hits.size else -1
 
-    # Scan depuis le centre vers la droite
     right_hits = np.where(hist[mid:] >= threshold)[0]
     right_x = (mid + int(right_hits[0])) if right_hits.size else -1
 
-    # Sanity check : voie trop étroite (probable artefact)
     if left_x >= 0 and right_x >= 0 and (right_x - left_x) < LANE_WIDTH_MIN:
         if hist[left_x] >= hist[right_x]:
             right_x = -1
@@ -171,22 +159,50 @@ def compute_steering(mask: np.ndarray):
             left_x = -1
 
     if left_x >= 0 and right_x >= 0:
-        target = (left_x + right_x) / 2.0
-        status = "BOTH"
-    elif left_x >= 0:
-        target = left_x + LANE_WIDTH_PX / 2.0
-        status = "LEFT"
-    elif right_x >= 0:
-        target = right_x - LANE_WIDTH_PX / 2.0
-        status = "RIGHT"
+        return (left_x + right_x) / 2.0, left_x, right_x, "BOTH"
+    if left_x >= 0:
+        return left_x + LANE_WIDTH_PX / 2.0, left_x, -1, "LEFT"
+    if right_x >= 0:
+        return right_x - LANE_WIDTH_PX / 2.0, -1, right_x, "RIGHT"
+    return None, -1, -1, "NONE"
+
+
+def compute_steering(mask: np.ndarray):
+    """
+    Reste ENTRE deux lignes blanches, et anticipe les virages.
+
+    Deux scans :
+      - NEAR (devant la voiture) → où la voie est MAINTENANT
+      - FAR  (plus loin)         → où la voie va
+
+    target = (1 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
+    → l'anticipation tire le braquage AVANT que le virage arrive devant.
+
+    Retourne (servo, found, target_x, left_x, right_x, lane_status)
+    """
+    w = mask.shape[1]
+    mid = w // 2
+
+    target_near, left_x, right_x, status_near = _scan_band(
+        mask, ROI_NEAR_TOP_RATIO, ROI_NEAR_BOTTOM_RATIO)
+    target_far, _, _, status_far = _scan_band(
+        mask, ROI_FAR_TOP_RATIO, ROI_FAR_BOTTOM_RATIO)
+
+    if target_near is None and target_far is None:
+        return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
+
+    if target_near is not None and target_far is not None:
+        target = (1.0 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
+    elif target_near is not None:
+        target = target_near
     else:
-        return SERVO_CENTER, False, mid, -1, -1, "NONE"
+        target = target_far  # seul l'horizon donne une info → on s'en sert
 
     error = (target - mid) / (w / 2.0)
     error = max(-1.0, min(1.0, error))
     servo = SERVO_CENTER + error * SERVO_RANGE
     servo = max(0.0, min(1.0, servo))
-    return servo, True, int(target), left_x, right_x, status
+    return servo, True, int(target), left_x, right_x, status_near, status_far
 
 
 # ── Frame partagée (thread-safe) ──────────────────────────────────────────────
@@ -361,7 +377,8 @@ def main():
 
                     # ── Détection (toujours) ───────────────────────────────
                     mask = detect_lines(raw, adaptive, threshold)
-                    servo_pos, line_found, target_x, left_x, right_x, lane_status = compute_steering(mask)
+                    (servo_pos, line_found, target_x,
+                     left_x, right_x, lane_near, lane_far) = compute_steering(mask)
 
                     # ── Décision moteur ────────────────────────────────────
                     if stopped:
@@ -394,29 +411,33 @@ def main():
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
 
                     sx = DISPLAY_W / src_w  # facteur d'échelle X
-                    roi_y0_px = int(DISPLAY_H * ROI_TOP_RATIO)
-                    roi_y1_px = int(DISPLAY_H * ROI_BOTTOM_RATIO)
+                    near_y0 = int(DISPLAY_H * ROI_NEAR_TOP_RATIO)
+                    near_y1 = int(DISPLAY_H * ROI_NEAR_BOTTOM_RATIO)
+                    far_y0  = int(DISPLAY_H * ROI_FAR_TOP_RATIO)
+                    far_y1  = int(DISPLAY_H * ROI_FAR_BOTTOM_RATIO)
 
-                    # Bande analysée (cadre jaune)
-                    cv2.rectangle(display, (0, roi_y0_px), (DISPLAY_W - 1, roi_y1_px),
+                    # Bandes analysées : NEAR (jaune) + FAR (cyan)
+                    cv2.rectangle(display, (0, near_y0), (DISPLAY_W - 1, near_y1),
                                   (0, 255, 255), 1)
+                    cv2.rectangle(display, (0, far_y0), (DISPLAY_W - 1, far_y1),
+                                  (255, 255, 0), 1)
 
                     # Centre image (bleu)
-                    cv2.line(display, (DISPLAY_W // 2, roi_y0_px),
-                             (DISPLAY_W // 2, roi_y1_px), (255, 0, 0), 1)
+                    cv2.line(display, (DISPLAY_W // 2, far_y0),
+                             (DISPLAY_W // 2, near_y1), (255, 0, 0), 1)
 
-                    # Lignes détectées (vert)
+                    # Lignes détectées dans la bande NEAR (vert)
                     if left_x >= 0:
                         x = int(left_x * sx)
-                        cv2.line(display, (x, roi_y0_px), (x, roi_y1_px), (0, 255, 0), 2)
+                        cv2.line(display, (x, near_y0), (x, near_y1), (0, 255, 0), 2)
                     if right_x >= 0:
                         x = int(right_x * sx)
-                        cv2.line(display, (x, roi_y0_px), (x, roi_y1_px), (0, 255, 0), 2)
+                        cv2.line(display, (x, near_y0), (x, near_y1), (0, 255, 0), 2)
 
                     # Cible (rouge)
                     tx = int(target_x * sx)
-                    cv2.line(display, (tx, roi_y0_px), (tx, DISPLAY_H), (0, 0, 255), 2)
-                    cv2.circle(display, (tx, (roi_y0_px + roi_y1_px) // 2), 6, (0, 0, 255), -1)
+                    cv2.line(display, (tx, far_y0), (tx, DISPLAY_H), (0, 0, 255), 2)
+                    cv2.circle(display, (tx, (near_y0 + near_y1) // 2), 6, (0, 0, 255), -1)
 
                     # Bandeau d'état (haut)
                     state_color = (0, 0, 255) if stopped else (0, 200, 0)
@@ -427,7 +448,7 @@ def main():
 
                     # Bandeau décisions (bas)
                     cv2.rectangle(display, (0, DISPLAY_H - 56), (DISPLAY_W, DISPLAY_H), (0, 0, 0), -1)
-                    line1 = f"DIR: {direction:<8}  LANES: {lane_status:<5}  servo={servo_pos:.2f}  duty={duty:.2f}"
+                    line1 = f"DIR: {direction:<8}  NEAR: {lane_near:<5}  FAR: {lane_far:<5}  servo={servo_pos:.2f}  duty={duty:.2f}"
                     line2 = f"{fps_val:4.1f} FPS  |  thr={threshold}  |  target_x={target_x}  ({'ADAPT' if adaptive else 'BIN'})"
                     cv2.putText(display, line1, (8, DISPLAY_H - 34),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
