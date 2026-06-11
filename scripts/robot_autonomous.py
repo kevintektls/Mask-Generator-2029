@@ -75,11 +75,15 @@ HTTP_PORT = 5000
 # Détection de lignes
 USE_ADAPTIVE_THRESH = False
 BINARY_THRESHOLD    = 180
-# ROI : bande horizontale juste devant la voiture (en ratio de la hauteur image)
-ROI_TOP_RATIO    = 0.65   # haut de la bande analysée
-ROI_BOTTOM_RATIO = 0.95   # bas de la bande analysée
+# ROI : bande étroite juste devant la voiture (on ignore l'horizon qui est bruité)
+ROI_TOP_RATIO    = 0.78
+ROI_BOTTOM_RATIO = 0.98
 # Largeur typique de voie en pixels (utilisée quand on ne voit qu'une seule ligne)
 LANE_WIDTH_PX = 320
+# Tolérance autour de LANE_WIDTH_PX : si l'écart entre les 2 pics est hors [min,max],
+# on retombe en mode "une seule ligne" (plus robuste face au bruit)
+LANE_WIDTH_MIN = 180
+LANE_WIDTH_MAX = 520
 
 # VESC
 VESC_PORT            = '/dev/ttyACM0'
@@ -91,8 +95,9 @@ VESC_CONNECT_SETTLE  = 1.0
 # Pilotage autonome
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.45   # amplitude max de braquage depuis le centre
-AUTO_DUTY       = 0.08   # vitesse normale en autonome
-AUTO_DUTY_SLOW  = 0.04   # vitesse réduite si aucune ligne détectée
+AUTO_DUTY       = 0.08   # vitesse max en ligne droite
+AUTO_DUTY_MIN   = 0.04   # vitesse min (gros virage / aucune ligne)
+TURN_SLOWDOWN   = 0.7    # quel % de AUTO_DUTY on coupe au braquage max (0..1)
 MAX_DUTY_CYCLE  = 0.10
 
 # Gamepad (arrêt d'urgence uniquement)
@@ -122,7 +127,15 @@ def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.n
 
 def compute_steering(mask: np.ndarray):
     """
-    Reste entre les deux lignes blanches.
+    Reste ENTRE deux lignes blanches sur fond noir.
+
+    Algo :
+      1. Bande étroite devant la voiture → histogramme par colonne.
+      2. On part du centre image et on scanne vers l'extérieur de chaque côté.
+         La PREMIÈRE colonne franchissant le seuil = frontière de la voie.
+         Tout ce qu'il y a au-delà (bruit, horizon, autres lignes) est ignoré.
+      3. Cible = milieu entre les deux frontières.
+      4. Si une seule vue : on suppose l'autre à LANE_WIDTH_PX.
 
     Retourne (servo, found, target_x, left_x, right_x, lane_status)
       lane_status ∈ {"BOTH", "LEFT", "RIGHT", "NONE"}
@@ -131,27 +144,39 @@ def compute_steering(mask: np.ndarray):
     y0 = int(h * ROI_TOP_RATIO)
     y1 = int(h * ROI_BOTTOM_RATIO)
     band = mask[y0:y1, :]
+    band_h = max(1, y1 - y0)
 
-    hist = np.sum(band > 0, axis=0)
+    # Histogramme par colonne, lissé pour gommer les spikes
+    hist = np.sum(band > 0, axis=0).astype(np.float32)
+    k = 15
+    hist = np.convolve(hist, np.ones(k, dtype=np.float32) / k, mode="same")
+
     mid = w // 2
-    min_peak = max(5, (y1 - y0) // 6)
+    # Seuil : une vraie ligne remplit au moins 25 % de la hauteur de la bande
+    threshold = band_h * 0.25
 
-    left_hist  = hist[:mid]
-    right_hist = hist[mid:]
+    # Scan depuis le centre vers la gauche → 1ère colonne au-dessus du seuil
+    left_hits = np.where(hist[:mid][::-1] >= threshold)[0]
+    left_x = (mid - 1 - int(left_hits[0])) if left_hits.size else -1
 
-    left_x  = int(np.argmax(left_hist))
-    right_x = int(np.argmax(right_hist)) + mid
+    # Scan depuis le centre vers la droite
+    right_hits = np.where(hist[mid:] >= threshold)[0]
+    right_x = (mid + int(right_hits[0])) if right_hits.size else -1
 
-    left_ok  = bool(left_hist[left_x] >= min_peak)
-    right_ok = bool(right_hist[right_x - mid] >= min_peak)
+    # Sanity check : voie trop étroite (probable artefact)
+    if left_x >= 0 and right_x >= 0 and (right_x - left_x) < LANE_WIDTH_MIN:
+        if hist[left_x] >= hist[right_x]:
+            right_x = -1
+        else:
+            left_x = -1
 
-    if left_ok and right_ok:
+    if left_x >= 0 and right_x >= 0:
         target = (left_x + right_x) / 2.0
         status = "BOTH"
-    elif left_ok:
+    elif left_x >= 0:
         target = left_x + LANE_WIDTH_PX / 2.0
         status = "LEFT"
-    elif right_ok:
+    elif right_x >= 0:
         target = right_x - LANE_WIDTH_PX / 2.0
         status = "RIGHT"
     else:
@@ -161,7 +186,7 @@ def compute_steering(mask: np.ndarray):
     error = max(-1.0, min(1.0, error))
     servo = SERVO_CENTER + error * SERVO_RANGE
     servo = max(0.0, min(1.0, servo))
-    return servo, True, int(target), left_x if left_ok else -1, right_x if right_ok else -1, status
+    return servo, True, int(target), left_x, right_x, status
 
 
 # ── Frame partagée (thread-safe) ──────────────────────────────────────────────
@@ -345,7 +370,15 @@ def main():
                         vesc.set_servo(SERVO_CENTER)
                         direction = "STOP"
                     else:
-                        duty = AUTO_DUTY if line_found else AUTO_DUTY_SLOW
+                        # Vitesse = AUTO_DUTY en ligne droite, ↘ vers AUTO_DUTY_MIN
+                        # quand on braque à fond. Plus le servo s'éloigne du centre,
+                        # plus on ralentit pour ne pas survirer.
+                        turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
+                        if line_found:
+                            duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
+                            duty = max(AUTO_DUTY_MIN, duty)
+                        else:
+                            duty = AUTO_DUTY_MIN
                         vesc.set_servo(servo_pos)
                         vesc.set_duty_cycle(duty)
                         if servo_pos < SERVO_CENTER - 0.05:
@@ -356,7 +389,7 @@ def main():
                             direction = "STRAIGHT"
 
                     # ── Affichage ──────────────────────────────────────────
-                    src_h, src_w = mask.shape
+                    src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
 
