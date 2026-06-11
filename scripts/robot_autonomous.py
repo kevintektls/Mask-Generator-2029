@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Robot Car — Pilotage autonome optimisé
-Version : Anti-décrochage avec priorité à l'horizon en virage serré.
+Robot Car — Pilotage autonome avec Mémoire Temporelle et Vitesse Adaptative
 """
 
 from __future__ import annotations
@@ -53,40 +52,46 @@ HTTP_PORT = 5000
 USE_ADAPTIVE_THRESH = False
 BINARY_THRESHOLD    = 170  
 
-# Découpage des zones de vision (Ratios verticaux)
-ROI_FAR_TOP     = 0.50
-ROI_FAR_BOT     = 0.68
-ROI_NEAR_TOP    = 0.65
-ROI_NEAR_BOT    = 0.82
+# Découpage des zones de vision
+ROI_FAR_TOP     = 0.48
+ROI_FAR_BOT     = 0.65
+ROI_NEAR_TOP    = 0.68
+ROI_NEAR_BOT    = 0.85
 
-LOOKAHEAD_WEIGHT = 0.75  # Importance accordée à l'horizon en ligne droite / courbe légère
 LANE_WIDTH_PX    = 340  
 LANE_WIDTH_MIN   = 160
 
-# VESC
+# 🧠 Paramètre de mémoire (Lissage temporel)
+# Plus la valeur est petite (ex: 0.15), plus la voiture a de la mémoire et est fluide.
+# Plus elle est grande (ex: 0.8), plus elle réagit vite mais risque d'osciller.
+SMOOTHING_ALPHA = 0.25  
+
+# 🔌 VESC
 VESC_PORT            = '/dev/ttyACM0'
 VESC_BAUDRATE        = 115200
 VESC_TIMEOUT         = 1.0
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0
 
-# Pilotage
+# 🏎️ Pilotage & Vitesse (Modérés pour la stabilité)
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
-AUTO_DUTY       = 0.07   
-AUTO_DUTY_MIN   = 0.045  
-TURN_SLOWDOWN   = 0.60   
+
+AUTO_DUTY       = 0.055  # Vitesse max baissée (était à 0.07) pour garder le contrôle
+AUTO_DUTY_MIN   = 0.038  # Vitesse plancher très basse pour forcer à ramper si besoin
+TURN_SLOWDOWN   = 0.75   # Freine plus agressivement en virage (75% de la vitesse coupée au max)
 
 GAMEPAD_TYPE    = Gamepad.Xbox360
-SNAPSHOT_DIR    = Path("snapshots")
 
 
-# ── Traitement d'Image et Masque Propre ───────────────────────────────────────
+# ── Variable d'état globale pour la mémoire du servo ──────────────────────────
+prev_servo_pos = SERVO_CENTER
+
+
+# ── Traitement d'Image ────────────────────────────────────────────────────────
 
 def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.ndarray:
-    """Génère un masque binaire nettoyé des bruits de route."""
     blurred = cv2.bilateralFilter(frame_gray, 7, 50, 50)
-    
     if adaptive:
         mask = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -97,15 +102,12 @@ def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.n
     
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open)   
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close) 
-    
     return mask
 
 
 def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
-    """Analyse une zone en moyennant l'histogramme horizontal."""
     h, w = mask.shape
     mid = w // 2
     band = mask[y_top:y_bot, :]
@@ -126,10 +128,8 @@ def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | 
     if left_x >= 0 and right_x >= 0:
         actual_width = right_x - left_x
         if actual_width < LANE_WIDTH_MIN:
-            if hist[left_x] >= hist[right_x]:
-                right_x = -1
-            else:
-                left_x = -1
+            if hist[left_x] >= hist[right_x]: right_x = -1
+            else: left_x = -1
 
     if left_x >= 0 and right_x >= 0:
         return (left_x + right_x) / 2.0, left_x, right_x, "BOTH"
@@ -142,7 +142,8 @@ def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | 
 
 
 def compute_steering(mask: np.ndarray):
-    """Calcule l'ordre servo avec verrouillage de l'horizon en courbe serrée."""
+    """Calcule l'ordre servo avec Lookahead dynamique et filtre de mémoire."""
+    global prev_servo_pos
     h, w = mask.shape
     mid = w // 2
 
@@ -153,38 +154,46 @@ def compute_steering(mask: np.ndarray):
     target_far, _, _, status_far = _get_band_center(mask, f_top, f_bot)
 
     if target_near is None and target_far is None:
-        return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
+        return prev_servo_pos, False, mid, -1, -1, "NONE", "NONE"
 
-    # ── Nouvelle Logique de Fusion Anti-Décrochage ──────────────────────────
+    # ── Lookahead Dynamique Adaptatif ──────────────────────────────────────────
     if target_near is not None and target_far is not None:
-        # Écart relatif de la cible lointaine par rapport au centre de l'image
         far_error = abs(target_far - mid) / (w / 2.0)
         
-        if far_error > 0.35:  # 35% d'excentration = virage prononcé validé
-            target = target_far  # Priorité totale à l'anticipation pour ne pas se redresser
+        if far_error > 0.30:  
+            # Virage détecté au loin : priorité absolue à l'anticipation (75%)
+            target = (0.25 * target_near) + (0.75 * target_far)
         else:
-            # En ligne droite ou courbe légère, on applique la pondération configurée
-            target = (1.0 - LOOKAHEAD_WEIGHT) * target_near + LOOKAHEAD_WEIGHT * target_far
+            # Ligne droite ou courbe très légère : on donne la priorité au NEAR (60%) 
+            # pour éviter que le bruit lointain ne fasse louvoyer la voiture.
+            target = (0.60 * target_near) + (0.40 * target_far)
             
     elif target_far is not None:
         target = target_far
     else:
         target = target_near
 
-    # Calcul de l'erreur finale normalisée (-1.0 à 1.0)
+    # Calcul de l'erreur brute (-1.0 à 1.0)
     error = (target - mid) / (w / 2.0)
-    
-    # Amortissement progressif autour du centre, direct en virage
     sign = 1.0 if error >= 0 else -1.0
-    error_smoothed = sign * (abs(error) ** 1.2)
+    error_smoothed = sign * (abs(error) ** 1.1)
 
-    servo = SERVO_CENTER + (error_smoothed * SERVO_RANGE)
-    servo = max(0.0, min(1.0, servo))
+    # Cible brute instantanée du servo
+    raw_servo_pos = SERVO_CENTER + (error_smoothed * SERVO_RANGE)
+    raw_servo_pos = max(0.0, min(1.0, raw_servo_pos))
     
-    return servo, True, int(target), left_x, right_x, status_near, status_far
+    # 🧠 Application de la mémoire (Filtre IIR)
+    # Lisse la trajectoire en combinant l'état précédent et la nouvelle vision
+    actual_servo = (1.0 - SMOOTHING_ALPHA) * prev_servo_pos + SMOOTHING_ALPHA * raw_servo_pos
+    actual_servo = max(0.0, min(1.0, actual_servo))
+    
+    # Sauvegarde pour la prochaine frame
+    prev_servo_pos = actual_servo
+    
+    return actual_servo, True, int(target), left_x, right_x, status_near, status_far
 
 
-# ── Architecture Système & Serveur Stream ─────────────────────────────────────
+# ── Reste de l'architecture système ───────────────────────────────────────────
 latest_frame: np.ndarray | None = None
 frame_lock = threading.Lock()
 stop_event = threading.Event()
@@ -225,21 +234,17 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 def start_http_server():
-    try:
-        HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
+    try: HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
     except Exception: pass
 
 def vesc_connect() -> VESC:
-    last_exc = None
     for attempt in range(VESC_CONNECT_RETRIES):
         try:
             vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
-            print(f"[INFO] VESC connecté (tentative {attempt + 1})")
+            print(f"[INFO] VESC connecté")
             return vesc
-        except Exception as e:
-            last_exc = e
-            time.sleep(VESC_CONNECT_SETTLE)
-    raise Exception(f"VESC introuvable : {last_exc}")
+        except Exception: time.sleep(VESC_CONNECT_SETTLE)
+    raise Exception("VESC introuvable")
 
 def build_pipeline() -> dai.Pipeline:
     pipeline = dai.Pipeline()
@@ -311,6 +316,7 @@ def main():
                         vesc.set_servo(SERVO_CENTER)
                         direction = "STOP"
                     else:
+                        # Vitesse proportionnelle au braquage
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         if line_found:
                             duty = AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)
@@ -325,7 +331,7 @@ def main():
                         elif servo_pos > SERVO_CENTER + 0.04: direction = "RIGHT"
                         else: direction = "STRAIGHT"
 
-                    # ── Rendu Visuel avec Cible Flottante ─────────────────────
+                    # Rendu visuel 
                     src_w = mask.shape[1]
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
@@ -342,7 +348,7 @@ def main():
                     cv2.line(display, (DISPLAY_W // 2, DISPLAY_H), (tx, int(DISPLAY_H * ROI_FAR_TOP)), (0, 0, 255), 2)
 
                     cv2.rectangle(display, (0, 0), (DISPLAY_W, 30), (0, 0, 0), -1)
-                    status_str = f"FPS: {fps_val:.1f} | {'[STOP]' if stopped else '[AUTONOMOUS]'} | Dir: {direction} | Servo: {servo_pos:.2f}"
+                    status_str = f"FPS: {fps_val:.1f} | {'[STOP]' if stopped else '[AUTONOMOUS]'} | Dir: {direction} | Servo: {servo_pos:.2f} | Duty: {duty:.3f}"
                     cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 202), 1)
 
                     with frame_lock:
