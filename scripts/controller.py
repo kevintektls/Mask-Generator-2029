@@ -25,6 +25,11 @@ POLL_INTERVAL = 0.05
 
 def main():
     print("Robot Car Controller Starting...")
+    if not Gamepad.available():
+        print("Waiting for gamepad to be connected...")
+        while not Gamepad.available():
+            time.sleep(1)
+    print("Gamepad connected.")
 
 if __name__ == '__main__':
     main()
