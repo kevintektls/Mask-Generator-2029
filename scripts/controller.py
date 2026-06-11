@@ -81,7 +81,7 @@ def main():
             print(f'[WARNING] Duty cycle is limited to {MAX_DUTY_CYCLE * 100:.1f}% for safety.')
             vesc.set_servo(SERVO_CENTER) # recenter servo on startup
             try: 
-                while Gamepad.isConnected(): # prevent of gamepad disconnection
+                while gamepad.isConnected(): # prevent of gamepad disconnection
                     forward_raw  = gamepad.axis(AXIS_FORWARD)
                     backward_raw = gamepad.axis(AXIS_BACKWARD)
                     steering_raw = gamepad.axis(AXIS_STEERING)
