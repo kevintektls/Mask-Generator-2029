@@ -142,7 +142,7 @@ def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | 
 
 
 def compute_steering(mask: np.ndarray):
-    """Calcule l'ordre servo avec Lookahead dynamique et filtre de mémoire."""
+    """Calcule l'ordre servo avec suivi de trajectoire et verrou anti-redressement."""
     global prev_servo_pos
     h, w = mask.shape
     mid = w // 2
@@ -153,85 +153,61 @@ def compute_steering(mask: np.ndarray):
     target_near, left_x, right_x, status_near = _get_band_center(mask, n_top, n_bot)
     target_far, _, _, status_far = _get_band_center(mask, f_top, f_bot)
 
+    # ── 1. Sécurité : Perte totale de visibilité en plein virage ──────────────
     if target_near is None and target_far is None:
-        return prev_servo_pos, False, mid, -1, -1, "NONE", "NONE"
+        # Si on tournait fort, on maintient le braquage (on ne remet PAS droit !)
+        if abs(prev_servo_pos - SERVO_CENTER) > 0.15:
+            return prev_servo_pos, False, mid, -1, -1, "NONE", "NONE"
+        return SERVO_CENTER, False, mid, -1, -1, "NONE", "NONE"
 
-    # ── Lookahead Dynamique Adaptatif ──────────────────────────────────────────
+    # ── 2. Logique de décision et fusion adaptative ──────────────────────────
     if target_near is not None and target_far is not None:
-        far_error = abs(target_far - mid) / (w / 2.0)
+        far_error = abs(target_far - mid) / (mid)
+        near_error = abs(target_near - mid) / (mid)
         
-        if far_error > 0.30:  
-            # Virage détecté au loin : priorité absolue à l'anticipation (75%)
-            target = (0.25 * target_near) + (0.75 * target_far)
+        # SI l'horizon détecte un virage violent (ex: 90°) OU que la voiture est déjà engagée
+        if far_error > 0.30 or near_error > 0.30:
+            # On donne la priorité absolue à la cible la plus excentrée (celle qui tourne le plus)
+            if far_error > near_error:
+                target = target_far
+            else:
+                target = target_near
         else:
-            # Ligne droite ou courbe très légère : on donne la priorité au NEAR (60%) 
-            # pour éviter que le bruit lointain ne fasse louvoyer la voiture.
-            target = (0.60 * target_near) + (0.40 * target_far)
+            # Ligne droite ou courbe légère standard
+            target = (0.50 * target_near) + (0.50 * target_far)
             
     elif target_far is not None:
         target = target_far
     else:
         target = target_near
 
-    # Calcul de l'erreur brute (-1.0 à 1.0)
-    error = (target - mid) / (w / 2.0)
-    sign = 1.0 if error >= 0 else -1.0
-    error_smoothed = sign * (abs(error) ** 1.1)
+    # ── 3. Calcul de l'erreur et amplification du braquage max ───────────────
+    error = (target - mid) / (mid)
+    
+    # Si l'erreur est forte (virage à 90°), on casse la progressivité pour braquer à fond immédiatement
+    if abs(error) > 0.35:
+        error_smoothed = 1.0 if error > 0 else -1.0
+    else:
+        sign = 1.0 if error >= 0 else -1.0
+        error_smoothed = sign * (abs(error) ** 1.1)
 
-    # Cible brute instantanée du servo
+    # Cible brute
     raw_servo_pos = SERVO_CENTER + (error_smoothed * SERVO_RANGE)
     raw_servo_pos = max(0.0, min(1.0, raw_servo_pos))
     
-    # 🧠 Application de la mémoire (Filtre IIR)
-    # Lisse la trajectoire en combinant l'état précédent et la nouvelle vision
-    actual_servo = (1.0 - SMOOTHING_ALPHA) * prev_servo_pos + SMOOTHING_ALPHA * raw_servo_pos
+    # ── 4. Mémoire dynamique asymétrique ──────────────────────────────────────
+    # Si la voiture doit BRAQUER plus fort, on réagit très vite (alpha élevé)
+    # Si elle veut se REDRESSER, on la freine (alpha très faible) pour maintenir le virage
+    if abs(raw_servo_pos - SERVO_CENTER) > abs(prev_servo_pos - SERVO_CENTER):
+        alpha = 0.45  # Réactivité d'entrée en virage
+    else:
+        alpha = 0.12  # Forte mémoire pour interdire le redressement brutal
+
+    actual_servo = (1.0 - alpha) * prev_servo_pos + alpha * raw_servo_pos
     actual_servo = max(0.0, min(1.0, actual_servo))
     
-    # Sauvegarde pour la prochaine frame
     prev_servo_pos = actual_servo
-    
     return actual_servo, True, int(target), left_x, right_x, status_near, status_far
-
-
-# ── Reste de l'architecture système ───────────────────────────────────────────
-latest_frame: np.ndarray | None = None
-frame_lock = threading.Lock()
-stop_event = threading.Event()
-
-class MJPEGHandler(BaseHTTPRequestHandler):
-    def log_message(self, *args): pass
-    def do_GET(self):
-        if self.path == "/":
-            html = (
-                b"<!DOCTYPE html><html><head><title>Autonomous Car Mask</title>"
-                b"<style>body{background:#111;margin:0;display:flex;justify-content:center;align-items:center;height:100vh;}"
-                b"img{max-width:100%;border:2px solid #00ffca;box-shadow: 0 0 20px #00ffca;}</style></head>"
-                b"<body><img src='/stream'></body></html>"
-            )
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
-        elif self.path == "/stream":
-            self.send_response(200)
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-            self.end_headers()
-            try:
-                while not stop_event.is_set():
-                    with frame_lock:
-                        frame = latest_frame
-                    if frame is None:
-                        time.sleep(0.01)
-                        continue
-                    ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                    if not ok: continue
-                    data = jpg.tobytes()
-                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data + b"\r\n")
-            except (BrokenPipeError, ConnectionResetError): pass
-        else:
-            self.send_response(404)
-            self.end_headers()
 
 def start_http_server():
     try: HTTPServer(("0.0.0.0", HTTP_PORT), MJPEGHandler).serve_forever()
