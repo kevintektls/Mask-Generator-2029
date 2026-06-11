@@ -25,6 +25,7 @@ Sécurité :
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 import gc
@@ -274,6 +275,9 @@ def main():
     threshold = BINARY_THRESHOLD
     count, t0, fps_val = 0, time.monotonic(), 0.0
     emergency_stop = False
+    has_display = bool(os.environ.get("DISPLAY"))
+    if not has_display:
+        print("[INFO] Pas de DISPLAY → fenêtre locale désactivée (stream HTTP uniquement)")
 
     with vesc:
         vesc.set_servo(SERVO_CENTER)
@@ -348,25 +352,26 @@ def main():
                         latest_frame = display
 
                     # ── Clavier local ──────────────────────────────────────
-                    try:
-                        cv2.imshow("Lane Mask", display)
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == ord("q"):
-                            print("Quitting…")
-                            stop_event.set()
-                        elif key == ord("s"):
-                            save_snapshot(display)
-                        elif key == ord("t"):
-                            adaptive = not adaptive
-                            print(f"Seuillage → {'ADAPTIVE' if adaptive else 'CLASSIQUE'}")
-                        elif key in (ord("+"), ord("=")):
-                            threshold = min(threshold + 5, 250)
-                            print(f"Seuil → {threshold}")
-                        elif key == ord("-"):
-                            threshold = max(threshold - 5, 10)
-                            print(f"Seuil → {threshold}")
-                    except cv2.error:
-                        pass  # headless
+                    if has_display:
+                        try:
+                            cv2.imshow("Lane Mask", display)
+                            key = cv2.waitKey(1) & 0xFF
+                            if key == ord("q"):
+                                print("Quitting…")
+                                stop_event.set()
+                            elif key == ord("s"):
+                                save_snapshot(display)
+                            elif key == ord("t"):
+                                adaptive = not adaptive
+                                print(f"Seuillage → {'ADAPTIVE' if adaptive else 'CLASSIQUE'}")
+                            elif key in (ord("+"), ord("=")):
+                                threshold = min(threshold + 5, 250)
+                                print(f"Seuil → {threshold}")
+                            elif key == ord("-"):
+                                threshold = max(threshold - 5, 10)
+                                print(f"Seuil → {threshold}")
+                        except cv2.error:
+                            pass  # headless
 
         except KeyboardInterrupt:
             print("\n[INFO] Ctrl+C reçu")
