@@ -58,8 +58,9 @@ def main():
         vesc = my_vesc_connect()
         with vesc:
             time.sleep(0.5)
-            print(f'[INFO] Starting, press START button to exit.')
+            print(f'[INFO] RT = avancer  |  LT = reculer  |  Joystick droit = direction')
             print(f'[WARNING] Duty cycle is limited to {MAX_DUTY_CYCLE * 100:.1f}% for safety.')
+            vesc.set_servo(SERVO_CENTER) # recenter servo on startup
 
     except Exception as e:
         print(f'[ERROR] Error occurred while connecting to VESC: {e}')
