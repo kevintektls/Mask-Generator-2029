@@ -56,10 +56,10 @@ BINARY_THRESHOLD    = 170  # Légèrement baissé pour mieux capter les lignes l
 # Découpage des zones de vision (Ratios verticaux)
 ROI_FAR_TOP     = 0.50
 ROI_FAR_BOT     = 0.68
-ROI_NEAR_TOP    = 0.70
-ROI_NEAR_BOT    = 0.95
+ROI_NEAR_TOP    = 0.65
+ROI_NEAR_BOT    = 0.82
 
-LOOKAHEAD_WEIGHT = 0.55  # Augmenté : donne plus d'importance à l'horizon (anticipation)
+LOOKAHEAD_WEIGHT = 0.75  # Augmenté : donne plus d'importance à l'horizon (anticipation)
 LANE_WIDTH_PX    = 340  # Largeur par défaut estimée de la voie à l'écran
 LANE_WIDTH_MIN   = 160
 
@@ -72,7 +72,7 @@ VESC_CONNECT_SETTLE  = 1.0
 
 # Pilotage
 SERVO_CENTER    = 0.5
-SERVO_RANGE     = 0.40   # Réduit légèrement pour éviter les coups de volant trop violents
+SERVO_RANGE     = 0.48   # Réduit légèrement pour éviter les coups de volant trop violents
 AUTO_DUTY       = 0.07   # Vitesse de croisière sûre pour les tests
 AUTO_DUTY_MIN   = 0.045  # Vitesse plancher en gros virage
 TURN_SLOWDOWN   = 0.60   # Ralentissement progressif en courbe
