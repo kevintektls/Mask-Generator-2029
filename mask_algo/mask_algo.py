@@ -12,14 +12,14 @@ except ImportError:
     print("DepthAI not installed."); sys.exit(1)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-DISPLAY_W         = 640
-DISPLAY_H         = 480
+DISPLAY_W         = 1920
+DISPLAY_H         = 1080
 HTTP_PORT         = 5000
 
 # Paramètres de détection (Ajustables selon ton éclairage)
 # Si tes lignes sont très nettes, un seuillage binaire classique (cv2.threshold) suffit.
 # Si la luminosité change bcp, le seuillage adaptatif est préférable.
-USE_ADAPTIVE_THRESH = True
+USE_ADAPTIVE_THRESH = False
 
 # ── Traitement d'image classique (Remplace U-Net) ──────────────────────────────
 def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
