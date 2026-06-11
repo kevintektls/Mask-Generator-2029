@@ -75,8 +75,11 @@ HTTP_PORT = 5000
 # Détection de lignes
 USE_ADAPTIVE_THRESH = False
 BINARY_THRESHOLD    = 180
-# ROI : on ne traite que la moitié basse de l'image (zone pertinente pour les lignes au sol)
-ROI_TOP_RATIO = 0.5
+# ROI : bande horizontale juste devant la voiture (en ratio de la hauteur image)
+ROI_TOP_RATIO    = 0.65   # haut de la bande analysée
+ROI_BOTTOM_RATIO = 0.95   # bas de la bande analysée
+# Largeur typique de voie en pixels (utilisée quand on ne voit qu'une seule ligne)
+LANE_WIDTH_PX = 320
 
 # VESC
 VESC_PORT            = '/dev/ttyACM0'
@@ -117,33 +120,48 @@ def detect_lines(frame_gray: np.ndarray, adaptive: bool, threshold: int) -> np.n
     return mask
 
 
-def compute_steering(mask: np.ndarray) -> tuple[float, bool]:
+def compute_steering(mask: np.ndarray):
     """
-    Calcule la consigne de servo à partir du masque binaire.
+    Reste entre les deux lignes blanches.
 
-    Stratégie : centroïde horizontal des pixels blancs dans la ROI basse.
-    Retourne (servo_position 0.0-1.0, ligne_détectée).
-
-    - Centre image  → servo 0.5 (tout droit)
-    - Décalage gauche → servo < 0.5 (virer à gauche)
-    - Décalage droite → servo > 0.5 (virer à droite)
+    Retourne (servo, found, target_x, left_x, right_x, lane_status)
+      lane_status ∈ {"BOTH", "LEFT", "RIGHT", "NONE"}
     """
     h, w = mask.shape
-    roi_y = int(h * ROI_TOP_RATIO)
-    roi = mask[roi_y:, :]  # moitié basse
+    y0 = int(h * ROI_TOP_RATIO)
+    y1 = int(h * ROI_BOTTOM_RATIO)
+    band = mask[y0:y1, :]
 
-    white_pixels = cv2.findNonZero(roi)
-    if white_pixels is None or len(white_pixels) < 50:
-        return SERVO_CENTER, False  # pas de ligne → tout droit par défaut
+    hist = np.sum(band > 0, axis=0)
+    mid = w // 2
+    min_peak = max(5, (y1 - y0) // 6)
 
-    cx = float(np.mean(white_pixels[:, 0, 0]))  # x moyen des pixels blancs
-    # Normalise : 0.0 (extrême gauche) → 1.0 (extrême droite)
-    normalized = cx / w
-    # Erreur par rapport au centre
-    error = normalized - 0.5
+    left_hist  = hist[:mid]
+    right_hist = hist[mid:]
+
+    left_x  = int(np.argmax(left_hist))
+    right_x = int(np.argmax(right_hist)) + mid
+
+    left_ok  = bool(left_hist[left_x] >= min_peak)
+    right_ok = bool(right_hist[right_x - mid] >= min_peak)
+
+    if left_ok and right_ok:
+        target = (left_x + right_x) / 2.0
+        status = "BOTH"
+    elif left_ok:
+        target = left_x + LANE_WIDTH_PX / 2.0
+        status = "LEFT"
+    elif right_ok:
+        target = right_x - LANE_WIDTH_PX / 2.0
+        status = "RIGHT"
+    else:
+        return SERVO_CENTER, False, mid, -1, -1, "NONE"
+
+    error = (target - mid) / (w / 2.0)
+    error = max(-1.0, min(1.0, error))
     servo = SERVO_CENTER + error * SERVO_RANGE
     servo = max(0.0, min(1.0, servo))
-    return servo, True
+    return servo, True, int(target), left_x if left_ok else -1, right_x if right_ok else -1, status
 
 
 # ── Frame partagée (thread-safe) ──────────────────────────────────────────────
@@ -274,7 +292,8 @@ def main():
     adaptive  = USE_ADAPTIVE_THRESH
     threshold = BINARY_THRESHOLD
     count, t0, fps_val = 0, time.monotonic(), 0.0
-    emergency_stop = False
+    stopped = False         # état RUN/STOP toggle via LB
+    prev_lb = False         # détection front montant
     has_display = bool(os.environ.get("DISPLAY"))
     if not has_display:
         print("[INFO] Pas de DISPLAY → fenêtre locale désactivée (stream HTTP uniquement)")
@@ -284,7 +303,7 @@ def main():
         vesc.set_duty_cycle(0)
         time.sleep(0.5)
         print("✓ VESC prêt — démarrage du pilotage autonome")
-        print("  Clavier local : q=quit  s=snapshot  t=toggle seuil  +/-=seuil\n")
+        print("  Manette : LB = toggle RUN/STOP  (caméra continue dans tous les cas)\n")
 
         try:
             with dai.Device(pipeline) as device:
@@ -292,19 +311,14 @@ def main():
 
                 while not stop_event.is_set():
 
-                    # ── Arrêt d'urgence gamepad ────────────────────────────
-                    if gamepad.isConnected() and gamepad.isPressed("LB"):
-                        if not emergency_stop:
-                            print("[URGENCE] LB pressé → arrêt moteur")
-                            emergency_stop = True
-                        vesc.set_duty_cycle(0)
-                        vesc.set_servo(SERVO_CENTER)
-                        time.sleep(POLL_INTERVAL)
-                        continue
-                    else:
-                        emergency_stop = False
+                    # ── Toggle RUN/STOP (front montant sur LB) ─────────────
+                    lb_now = gamepad.isConnected() and gamepad.isPressed("LB")
+                    if lb_now and not prev_lb:
+                        stopped = not stopped
+                        print(f"[GAMEPAD] {'⏸  STOP' if stopped else '▶  RUN'}")
+                    prev_lb = lb_now
 
-                    # ── Frame caméra ───────────────────────────────────────
+                    # ── Frame caméra (toujours, même à l'arrêt) ────────────
                     pkt = q.tryGet()
                     if pkt is None:
                         time.sleep(0.001)
@@ -320,33 +334,72 @@ def main():
                         count = 0
                         t0 = now
 
-                    # ── Détection + pilotage ───────────────────────────────
+                    # ── Détection (toujours) ───────────────────────────────
                     mask = detect_lines(raw, adaptive, threshold)
-                    servo_pos, line_found = compute_steering(mask)
+                    servo_pos, line_found, target_x, left_x, right_x, lane_status = compute_steering(mask)
 
-                    duty = AUTO_DUTY if line_found else AUTO_DUTY_SLOW
-
-                    vesc.set_servo(servo_pos)
-                    vesc.set_duty_cycle(duty)
+                    # ── Décision moteur ────────────────────────────────────
+                    if stopped:
+                        duty = 0.0
+                        vesc.set_duty_cycle(0.0)
+                        vesc.set_servo(SERVO_CENTER)
+                        direction = "STOP"
+                    else:
+                        duty = AUTO_DUTY if line_found else AUTO_DUTY_SLOW
+                        vesc.set_servo(servo_pos)
+                        vesc.set_duty_cycle(duty)
+                        if servo_pos < SERVO_CENTER - 0.05:
+                            direction = "LEFT"
+                        elif servo_pos > SERVO_CENTER + 0.05:
+                            direction = "RIGHT"
+                        else:
+                            direction = "STRAIGHT"
 
                     # ── Affichage ──────────────────────────────────────────
+                    src_h, src_w = mask.shape
                     display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                     display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
 
-                    # Ligne de centroïde visuelle
-                    roi_y_px = int(DISPLAY_H * ROI_TOP_RATIO)
-                    cx_px = int(servo_pos * DISPLAY_W)
-                    cv2.line(display, (cx_px, roi_y_px), (cx_px, DISPLAY_H),
-                             (0, 0, 255), 2)
-                    cv2.line(display, (DISPLAY_W // 2, roi_y_px),
-                             (DISPLAY_W // 2, DISPLAY_H), (255, 0, 0), 1)
+                    sx = DISPLAY_W / src_w  # facteur d'échelle X
+                    roi_y0_px = int(DISPLAY_H * ROI_TOP_RATIO)
+                    roi_y1_px = int(DISPLAY_H * ROI_BOTTOM_RATIO)
 
-                    status = "LINE OK" if line_found else "NO LINE"
-                    mode_str = "ADAPTIVE" if adaptive else f"BINARY thr={threshold}"
-                    label = (f"{fps_val:.1f} FPS | {mode_str} | "
-                             f"servo={servo_pos:.2f} duty={duty:.2f} | {status}")
-                    cv2.putText(display, label, (8, 22),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    # Bande analysée (cadre jaune)
+                    cv2.rectangle(display, (0, roi_y0_px), (DISPLAY_W - 1, roi_y1_px),
+                                  (0, 255, 255), 1)
+
+                    # Centre image (bleu)
+                    cv2.line(display, (DISPLAY_W // 2, roi_y0_px),
+                             (DISPLAY_W // 2, roi_y1_px), (255, 0, 0), 1)
+
+                    # Lignes détectées (vert)
+                    if left_x >= 0:
+                        x = int(left_x * sx)
+                        cv2.line(display, (x, roi_y0_px), (x, roi_y1_px), (0, 255, 0), 2)
+                    if right_x >= 0:
+                        x = int(right_x * sx)
+                        cv2.line(display, (x, roi_y0_px), (x, roi_y1_px), (0, 255, 0), 2)
+
+                    # Cible (rouge)
+                    tx = int(target_x * sx)
+                    cv2.line(display, (tx, roi_y0_px), (tx, DISPLAY_H), (0, 0, 255), 2)
+                    cv2.circle(display, (tx, (roi_y0_px + roi_y1_px) // 2), 6, (0, 0, 255), -1)
+
+                    # Bandeau d'état (haut)
+                    state_color = (0, 0, 255) if stopped else (0, 200, 0)
+                    state_text = "⏸ STOPPED (LB pour RUN)" if stopped else "▶ RUNNING (LB pour STOP)"
+                    cv2.rectangle(display, (0, 0), (DISPLAY_W, 28), (0, 0, 0), -1)
+                    cv2.putText(display, state_text, (8, 20),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
+
+                    # Bandeau décisions (bas)
+                    cv2.rectangle(display, (0, DISPLAY_H - 56), (DISPLAY_W, DISPLAY_H), (0, 0, 0), -1)
+                    line1 = f"DIR: {direction:<8}  LANES: {lane_status:<5}  servo={servo_pos:.2f}  duty={duty:.2f}"
+                    line2 = f"{fps_val:4.1f} FPS  |  thr={threshold}  |  target_x={target_x}  ({'ADAPT' if adaptive else 'BIN'})"
+                    cv2.putText(display, line1, (8, DISPLAY_H - 34),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    cv2.putText(display, line2, (8, DISPLAY_H - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
                     with frame_lock:
                         latest_frame = display
