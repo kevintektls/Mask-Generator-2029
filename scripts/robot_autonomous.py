@@ -77,9 +77,9 @@ VESC_CONNECT_SETTLE  = 1.0
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 
-AUTO_DUTY       = 0.055  # Vitesse max baissée (était à 0.07) pour garder le contrôle
-AUTO_DUTY_MIN   = 0.038  # Vitesse plancher très basse pour forcer à ramper si besoin
-TURN_SLOWDOWN   = 0.75   # Freine plus agressivement en virage (75% de la vitesse coupée au max)
+AUTO_DUTY       = 0.045  # Vitesse max baissée (était à 0.07) pour garder le contrôle
+AUTO_DUTY_MIN   = 0.010  # Vitesse plancher très basse pour forcer à ramper si besoin
+TURN_SLOWDOWN   = 0.90   # Freine plus agressivement en virage (75% de la vitesse coupée au max)
 
 GAMEPAD_TYPE    = Gamepad.Xbox360
 
