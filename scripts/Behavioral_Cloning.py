@@ -83,7 +83,7 @@ DEADZONE       = 0.08
 # Paramètres Physiques Pilotage
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
-AUTO_DUTY       = 0.15  
+AUTO_DUTY       = 0.1
 AUTO_DUTY_MIN   = 0.010  
 TURN_SLOWDOWN   = 0.90   
 
@@ -117,35 +117,36 @@ def apply_deadzone(value: float) -> float:
 
 def detect_lines_stereo(frame_left: np.ndarray, frame_right: np.ndarray) -> np.ndarray:
     """
-    Fusionne les caméras gauche et droite et applique un filtre bilatéral 
-    pour détruire les aspérités du sol tout en préservant les lignes blanches.
+    Version corrigée : Filtre le bruit hors piste avant de lisser les lignes.
     """
-    # 1. Fusion par maximum (On garde le pixel le plus lumineux des deux caméras)
+    # 1. Fusion des deux vues
     merged = cv2.max(frame_left, frame_right)
     
     h, w = merged.shape
     clean_mask = np.zeros_like(merged)
     
-    # 2. Rognage de la zone d'intérêt (Sol uniquement)
+    # 2. Rognage horizon
     start_y = int(h * CROP_TOP_RATIO)
     roi_sol = merged[start_y:h, :]
     
-    # 3. Filtre Bilatéral : Lisse la piste (bruit) mais garde les contours des lignes nets
-    # Très performant sur Jetson Nano pour ce cas précis
-    filtered = cv2.bilateralFilter(roi_sol, d=7, sigmaColor=50, sigmaSpace=50)
+    # 3. Filtre bilatéral pour lisser le grain de la piste
+    filtered = cv2.bilateralFilter(roi_sol, d=5, sigmaColor=40, sigmaSpace=40)
     
-    # 4. Seuillage binaire drastique
-    _, binary_sol = cv2.threshold(filtered, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
+    # 4. Seuillage TRÈS strict (on passe à 230 pour tuer le gris/imperfections)
+    _, binary_sol = cv2.threshold(filtered, 230, 255, cv2.THRESH_BINARY)
     
-    # Repositionnement dans le masque global
+    # 5. Nettoyage Morphologique Intelligent
+    # On utilise une forme d'ellipse (plus naturelle pour les perspectives)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    
+    # Étape A : OPEN (Erosion puis Dilatation) -> Supprime les petits points isolés hors piste
+    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_OPEN, kernel)
+    
+    # Étape B : CLOSE (Dilatation puis Erosion) -> Bouche les petits trous DANS les lignes
+    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_CLOSE, kernel)
+    
+    # Remise dans le masque global
     clean_mask[start_y:h, :] = binary_sol
-    
-    # 5. Nettoyage morphologique ciblé (Fermeture verticale pour lier les segments de ligne)
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
-    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close)
-
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel_open)
     
     return clean_mask
 
