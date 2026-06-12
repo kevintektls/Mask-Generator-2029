@@ -38,7 +38,7 @@ VESC_TIMEOUT  = 1.0
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 AUTO_DUTY       = 0.040  # Vitesse de croisière sécurisée pour l'IA
-MODEL_PATH      = "../model/pilot_model.pth "
+MODEL_PATH      = "../model/pilot_model.pth"
 
 # Configuration Manette (Logitech F710 / Xbox360) pour la reprise de contrôle urgente
 GAMEPAD_TYPE = Gamepad.Xbox360
