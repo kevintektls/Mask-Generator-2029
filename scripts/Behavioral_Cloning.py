@@ -98,7 +98,7 @@ is_recording   = False
 csv_writer     = None
 csv_file_handle = None
 record_lock    = threading.Lock()
-
+write_queue    = Queue(maxsize=60) 
 
 # ── Fonctions Utilitaires Manette ─────────────────────────────────────────────
 
@@ -284,7 +284,16 @@ def build_pipeline() -> dai.Pipeline:
     cam.out.link(xout.input)
     return pipeline
 
-
+def disk_writer():
+    while True:
+        try:
+            img_path, data, row = write_queue.get(timeout=1.0)
+            cv2.imwrite(str(img_path), data)
+            with record_lock:
+                csv_writer.writerow(row)
+                csv_file_handle.flush()
+        except Empty:
+            continue
 # ── Boucle Principale de Contrôle ─────────────────────────────────────────────
 
 def main():
@@ -306,6 +315,7 @@ def main():
     prev_a  = False
     has_display = bool(os.environ.get("DISPLAY"))
 
+    threading.Thread(target=disk_writer, daemon=True).start()
     with vesc:
         vesc.set_servo(SERVO_CENTER)
         vesc.set_duty_cycle(0)
@@ -385,12 +395,11 @@ def main():
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
-                        
-                        threading.Thread(target=cv2.imwrite, args=(str(img_path), mask)).start()
-                        
-                        with record_lock:
-                            csv_writer.writerow([f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"])
-                            csv_file_handle.flush()
+                        row = [f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"]
+                    try:
+                        write_queue.put_nowait((img_path, mask.copy(), row))
+                    except:
+                        pass
 
                     # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
