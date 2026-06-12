@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Robot Car — Pilotage Autonome par Intelligence Artificielle (Behavioral Cloning)
-Plateforme : Jetson Nano 4Go (Inférence PyTorch en temps réel)
+Plateforme : Jetson Nano 4Go (Inférence PyTorch en temps réel - Optimisé CPU)
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ VESC_TIMEOUT  = 1.0
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 AUTO_DUTY       = 0.040  # Vitesse de croisière sécurisée pour l'IA
-MODEL_PATH      = "../model/best_autopilot.pth"
+MODEL_PATH      = "../model/best_autopilot.pth "
 
 # Configuration Manette (Logitech F710 / Xbox360) pour la reprise de contrôle urgente
 GAMEPAD_TYPE = Gamepad.Xbox360
@@ -89,18 +89,24 @@ def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
 def main():
     print("[INFO] Initialisation de l'Autopilote IA...")
     
-    # 1. Sélection du hardware (GPU si dispo, sinon CPU)
+    # 1. Sélection du hardware (Ici, forcera le CPU)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Inférence exécutée sur : {device}")
+
+    # 🚀 OPTIMISATION CPU : Empêche PyTorch de saturer tous les cœurs et de faire laguer l'OS
+    if device.type == "cpu":
+        torch.set_num_threads(2) # Laisse 2 cœurs libres pour DepthAI et la gestion système
+        print("[OPTIMISATION] Nombre de threads PyTorch restreint à 2 pour préserver la Jetson.")
 
     # 2. Chargement du modèle entraîné
     model = BehavioralCloningCNN().to(device)
     if not os.path.exists(MODEL_PATH):
-        print(f"[ERROR] Le fichier modèle '{MODEL_PATH}' est introuvable !")
+        print(f"[ERROR] Le fichier modèle '{MODEL_PATH}' est introuvable au chemin : {MODEL_PATH}")
         sys.exit(1)
         
+    # Le map_location=device force la conversion des tenseurs du fichier vers le CPU sans planter
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-    model.eval() # Mode évaluation obligatoire (coupe le dropout / batchnorm)
+    model.eval() # Mode évaluation obligatoire
     print("[INFO] Modèle de Behavioral Cloning chargé avec succès.")
 
     # 3. Connexion au Gamepad (Sécurité)
@@ -135,7 +141,7 @@ def main():
     has_display = bool(os.environ.get("DISPLAY"))
     ai_active = True
 
-    print("\n=== 🤖 AUTOPILOTE IA PRÊT ===")
+    print("\n=== 🤖 AUTOPILOTE IA PRÊT (MODE CPU) ===")
     print(" -> Appuie sur LB sur la manette ou CTRL+C pour stopper la voiture immédiatement.\n")
 
     with vesc:
@@ -164,27 +170,28 @@ def main():
                     mask = detect_lines(raw)
 
                     # 🧠 Étape IA : Préparation de l'image pour le réseau de neurones
-                    # Exactement le même traitement qu'au moment du train
                     mask_resized = cv2.resize(mask, (160, 120))
-                    img_tensor = torch.tensor(mask_resized, dtype=torch.float32).unsqueeze(0).unsqueeze(0) / 255.0
+                    
+                    # Transformation propre en tenseur PyTorch Float32 [1, 1, 120, 160]
+                    img_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0).unsqueeze(0) / 255.0
                     img_tensor = img_tensor.to(device)
 
-                    # Inférence (sans calcul de gradient pour économiser la Jetson)
+                    # Inférence ultra rapide (sans calcul de gradient)
                     with torch.no_grad():
                         prediction = model(img_tensor).item()
 
-                    # Contrainte de sécurité de la sortie du servo
+                    # Contrainte de sécurité de la sortie du servo (0.0 à 1.0)
                     servo_pos = max(0.0, min(1.0, prediction))
 
-                    # Envoi des ordres physiques
+                    # Envoi des ordres physiques au châssis
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(AUTO_DUTY)
 
-                    # Rendu HUD si un écran est branché
+                    # Rendu HUD si un écran est branché via SSH -X ou HDMI
                     if has_display:
                         display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
                         display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-                        status_str = f"IA PILOTING | Servo Pred: {servo_pos:.2f} | Duty: {AUTO_DUTY}"
+                        status_str = f"IA CPU | Servo: {servo_pos:.2f} | Duty: {AUTO_DUTY}"
                         cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                         cv2.imshow("IA Autopilot Output", display)
                         if cv2.waitKey(1) & 0xFF == ord("q"):
