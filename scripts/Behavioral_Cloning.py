@@ -125,11 +125,9 @@ def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
     _, binary_sol = cv2.threshold(blurred, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
     
     clean_mask[start_y:h, :] = binary_sol
-    # Fermeture verticale : comble les micro-coupures dans les lignes
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))  # (largeur, hauteur)
-    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, clean_mask, kernel_close)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))
+    clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close)
 
-    # Open classique pour virer le bruit pixel
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel_open)
     
