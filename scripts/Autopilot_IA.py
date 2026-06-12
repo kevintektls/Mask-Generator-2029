@@ -49,28 +49,30 @@ class BehavioralCloningCNN(nn.Module):
     def __init__(self):
         super(BehavioralCloningCNN, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 24, kernel_size=5, stride=2), 
+            nn.Conv2d(1, 24, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.Conv2d(24, 36, kernel_size=5, stride=2), 
+            nn.Conv2d(24, 36, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.Conv2d(36, 48, kernel_size=5, stride=2), 
+            nn.Conv2d(36, 48, kernel_size=5, stride=2),
             nn.ReLU(),
-            nn.Conv2d(48, 64, kernel_size=3, stride=1), 
+            nn.Conv2d(48, 64, kernel_size=3, stride=1),
             nn.ReLU(),
+            nn.Dropout(0.3)
         )
+        self.flatten = nn.Flatten()
         self.regressor = nn.Sequential(
-            nn.Flatten(),
             nn.Linear(64 * 10 * 15, 100),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(100, 50),
             nn.ReLU(),
-            nn.Linear(50, 1) 
+            nn.Linear(50, 1)
         )
 
     def forward(self, x):
         x = self.features(x)
-        x = self.regressor(x)
-        return x.squeeze(1)
+        x = self.flatten(x)
+        return self.regressor(x).squeeze(1)
 
 
 # ── TRAITEMENT DE VISION ──────────────────────────────────────────────────────
@@ -105,7 +107,7 @@ def main():
         sys.exit(1)
         
     # Le map_location=device force la conversion des tenseurs du fichier vers le CPU sans planter
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval() # Mode évaluation obligatoire
     print("[INFO] Modèle de Behavioral Cloning chargé avec succès.")
 
