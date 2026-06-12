@@ -82,7 +82,7 @@ DEADZONE       = 0.08
 # Paramètres Physiques Pilotage
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
-AUTO_DUTY       = 0.045  # Ta vitesse cible max en autonome / manuel
+AUTO_DUTY       = 0.15  # Ta vitesse cible max en autonome / manuel
 AUTO_DUTY_MIN   = 0.010  
 TURN_SLOWDOWN   = 0.90   
 
