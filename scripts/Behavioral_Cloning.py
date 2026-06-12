@@ -48,12 +48,12 @@ except ImportError:
 
 DISPLAY_W = 640
 DISPLAY_H = 480
-CAM_FPS   = 60
+CAM_FPS   = 30
 HTTP_PORT = 5000
 
 # ✂️ Rognage horizon & Seuil ultra-binaire
 CROP_TOP_RATIO      = 0.40  
-ULTRA_BINARY_THRESH = 220  
+ULTRA_BINARY_THRESH = 220
 
 # Zones de vision pour l'algo géométrique classique
 ROI_FAR_TOP     = 0.15
