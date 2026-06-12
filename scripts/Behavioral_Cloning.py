@@ -2,7 +2,7 @@
 """
 Robot Car — Pilotage & Enregistrement pour Entraînement IA (Behavioral Cloning)
 Plateforme : Jetson Nano 4Go (Optimisé RAM & Stockage via Masque Binaire)
-Version corrigée avec les vrais axes du Logitech F710 (Mode Xbox360)
+Version : Optimisation Stéréo (Left + Right) & Filtrage Avancé du Masque
 """
 
 from __future__ import annotations
@@ -53,8 +53,8 @@ CAM_FPS   = 30
 HTTP_PORT = 5000
 
 # ✂️ Rognage horizon & Seuil ultra-binaire
-CROP_TOP_RATIO      = 0.40  
-ULTRA_BINARY_THRESH = 220
+CROP_TOP_RATIO      = 0.45  # Légèrement descendu pour éviter les bruits lointains
+ULTRA_BINARY_THRESH = 215   # Ajusté pour être un poil plus tolérant avec la fusion
 
 # Zones de vision pour l'algo géométrique classique
 ROI_FAR_TOP     = 0.15
@@ -83,7 +83,7 @@ DEADZONE       = 0.08
 # Paramètres Physiques Pilotage
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
-AUTO_DUTY       = 0.15  # Ta vitesse cible max en autonome / manuel
+AUTO_DUTY       = 0.15  
 AUTO_DUTY_MIN   = 0.010  
 TURN_SLOWDOWN   = 0.90   
 
@@ -113,20 +113,35 @@ def apply_deadzone(value: float) -> float:
     return sign * (abs(value) - DEADZONE) / (1.0 - DEADZONE)
 
 
-# ── Vision Ultra-Binaire Rognée ───────────────────────────────────────────────
+# ── Vision Stéréo Ultra-Binaire Nettoyée ──────────────────────────────────────
 
-def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
-    h, w = frame_gray.shape
-    clean_mask = np.zeros_like(frame_gray)
+def detect_lines_stereo(frame_left: np.ndarray, frame_right: np.ndarray) -> np.ndarray:
+    """
+    Fusionne les caméras gauche et droite et applique un filtre bilatéral 
+    pour détruire les aspérités du sol tout en préservant les lignes blanches.
+    """
+    # 1. Fusion par maximum (On garde le pixel le plus lumineux des deux caméras)
+    merged = cv2.max(frame_left, frame_right)
     
+    h, w = merged.shape
+    clean_mask = np.zeros_like(merged)
+    
+    # 2. Rognage de la zone d'intérêt (Sol uniquement)
     start_y = int(h * CROP_TOP_RATIO)
-    roi_sol = frame_gray[start_y:h, :]
+    roi_sol = merged[start_y:h, :]
     
-    blurred = cv2.GaussianBlur(roi_sol, (5, 5), 0)
-    _, binary_sol = cv2.threshold(blurred, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
+    # 3. Filtre Bilatéral : Lisse la piste (bruit) mais garde les contours des lignes nets
+    # Très performant sur Jetson Nano pour ce cas précis
+    filtered = cv2.bilateralFilter(roi_sol, d=7, sigmaColor=50, sigmaSpace=50)
     
+    # 4. Seuillage binaire drastique
+    _, binary_sol = cv2.threshold(filtered, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
+    
+    # Repositionnement dans le masque global
     clean_mask[start_y:h, :] = binary_sol
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 25))
+    
+    # 5. Nettoyage morphologique ciblé (Fermeture verticale pour lier les segments de ligne)
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
     clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close)
 
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -272,17 +287,36 @@ def vesc_connect() -> VESC:
         except Exception: time.sleep(VESC_CONNECT_SETTLE)
     raise Exception("Erreur : VESC introuvable.")
 
+
+# ── Configuration Pipeline Stéréo DepthAI ─────────────────────────────────────
+
 def build_pipeline() -> dai.Pipeline:
     pipeline = dai.Pipeline()
-    cam = pipeline.create(dai.node.MonoCamera)
-    cam.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-    cam.setFps(CAM_FPS)
-    xout = pipeline.create(dai.node.XLinkOut)
-    xout.setStreamName("left")
-    xout.input.setBlocking(False)
-    xout.input.setQueueSize(2)
-    cam.out.link(xout.input)
+    
+    # Caméra Gauche
+    cam_left = pipeline.create(dai.node.MonoCamera)
+    cam_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+    cam_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
+    cam_left.setFps(CAM_FPS)
+    
+    xout_left = pipeline.create(dai.node.XLinkOut)
+    xout_left.setStreamName("left")
+    xout_left.input.setBlocking(False)
+    xout_left.input.setQueueSize(2)
+    cam_left.out.link(xout_left.input)
+    
+    # Caméra Droite
+    cam_right = pipeline.create(dai.node.MonoCamera)
+    cam_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+    cam_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
+    cam_right.setFps(CAM_FPS)
+    
+    xout_right = pipeline.create(dai.node.XLinkOut)
+    xout_right.setStreamName("right")
+    xout_right.input.setBlocking(False)
+    xout_right.input.setQueueSize(2)
+    cam_right.out.link(xout_right.input)
+    
     return pipeline
 
 def disk_writer():
@@ -295,6 +329,7 @@ def disk_writer():
                 csv_file_handle.flush()
         except Empty:
             continue
+
 # ── Boucle Principale de Contrôle ─────────────────────────────────────────────
 
 def main():
@@ -327,13 +362,14 @@ def main():
         
         try:
             with dai.Device(pipeline) as device:
-                q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
+                # Récupération des deux files d'attente
+                q_left = device.getOutputQueue(name="left", maxSize=2, blocking=False)
+                q_right = device.getOutputQueue(name="right", maxSize=2, blocking=False)
 
                 while not stop_event.is_set() and gamepad.isConnected():
                     lb_now = gamepad.isPressed("LB")
                     a_now  = gamepad.isPressed("A")
                     
-                    # Commutateur de Mode (LB)
                     if lb_now and not prev_lb:
                         autonomous_mode = not autonomous_mode
                         if autonomous_mode:
@@ -342,20 +378,24 @@ def main():
                         print(f"[MODE] {'🏎️ AUTONOME GÉOMÉTRIQUE' if autonomous_mode else '🎮 CONDUITE MANUELLE'}")
                     prev_lb = lb_now
 
-                    # Commutateur d'enregistrement (A)
                     if a_now and not prev_a and not autonomous_mode:
                         with record_lock:
                             is_recording = not is_recording
                         print(f"[DATASET] {'🔴 ENREGISTREMENT EN COURS...' if is_recording else '⏹️ ENREGISTREMENT STOPPÉ'}")
                     prev_a = a_now
 
-                    pkt = q.tryGet()
-                    if pkt is None:
+                    # Récupération synchrone des frames OAK-D
+                    pkt_left = q_left.tryGet()
+                    pkt_right = q_right.tryGet()
+                    
+                    if pkt_left is None or pkt_right is None:
                         time.sleep(0.002)
                         continue
 
-                    raw = pkt.getCvFrame()
-                    h, w = raw.shape
+                    raw_left = pkt_left.getCvFrame()
+                    raw_right = pkt_right.getCvFrame()
+                    
+                    h, w = raw_left.shape
                     count += 1
                     now = time.monotonic()
                     if now - t0 >= 1.0:
@@ -363,35 +403,30 @@ def main():
                         count = 0
                         t0 = now
 
-                    mask = detect_lines(raw)
+                    # Appel de notre fonction de traitement stéréo ultra-propre
+                    mask = detect_lines_stereo(raw_left, raw_right)
 
-                    # Gestion de la commande moteur et direction
                     if autonomous_mode:
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
                         duty = max(AUTO_DUTY_MIN, AUTO_DUTY * (1.0 - TURN_SLOWDOWN * turn)) if line_found else AUTO_DUTY_MIN
                     else:
-                        # ── 🕹️ Mode Manuel via Syntaxe Correcte .axis() ──
                         forward_raw  = gamepad.axis(AXIS_FORWARD)
                         backward_raw = gamepad.axis(AXIS_BACKWARD)
                         steering_raw = gamepad.axis(AXIS_STEERING)
 
-                        # Calcul de l'accélération (Différence entre avancer et reculer)
                         throttle = clamp(forward_raw - backward_raw, -1.0, 1.0)
                         throttle = apply_deadzone(throttle)
                         duty = clamp(throttle * AUTO_DUTY, -AUTO_DUTY, AUTO_DUTY)
 
-                        # Calcul de la direction
                         steer_v = apply_deadzone(steering_raw)
                         servo_pos = clamp(SERVO_CENTER + steer_v * SERVO_RANGE, 0.0, 1.0)
                         
                         target_x, left_x, right_x = w // 2, -1, -1
 
-                    # Envoi des consignes physiques au VESC
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    # 💾 Sauvegarde asynchrone des masques binaire
                     if is_recording and abs(duty) > 0.005:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
