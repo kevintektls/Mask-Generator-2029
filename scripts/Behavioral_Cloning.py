@@ -117,33 +117,51 @@ def apply_deadzone(value: float) -> float:
 
 def detect_lines_stereo(frame_left: np.ndarray, frame_right: np.ndarray) -> np.ndarray:
     """
-    Version corrigée : Filtre le bruit hors piste avant de lisser les lignes.
+    Version Stéréo Alignée : Aligne l'image droite sur la gauche 
+    pour éliminer l'effet de parallaxe avant la fusion.
     """
-    # 1. Fusion des deux vues
-    merged = cv2.max(frame_left, frame_right)
+    h, w = frame_left.shape
     
-    h, w = merged.shape
+    # ── 🎛️ PARAMÈTRES D'ALIGNEMENT MANUEL ──────────────────────────────────────
+    # Ajuste ces valeurs en regardant ton flux vidéo pour superposer les deux yeux
+    dx    = -15.0   # Déplacement horizontal (en pixels) pour corriger l'écartement
+    dy    = -5.0    # Déplacement vertical (en pixels) si la caméra droite est surélevée
+    angle = 0.0     # Rotation (en degrés) si une caméra est légèrement de biais
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # 1. Calcul et application de la matrice de correction pour l'image droite
+    # On prend le centre de l'image comme pivot pour la rotation
+    center = (w / 2, h / 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    M[0, 2] += dx  # Applique la translation X
+    M[1, 2] += dy  # Applique la translation Y
+    
+    # Transformation de l'image droite pour l'aligner sur la gauche
+    frame_right_aligned = cv2.warpAffine(frame_right, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+    # 2. Fusion par Maximum (Maintenant que c'est aligné, les lignes se superposent !)
+    merged = cv2.max(frame_left, frame_right_aligned)
+    
     clean_mask = np.zeros_like(merged)
     
-    # 2. Rognage horizon
+    # 3. Rognage horizon
     start_y = int(h * CROP_TOP_RATIO)
     roi_sol = merged[start_y:h, :]
     
-    # 3. Filtre bilatéral pour lisser le grain de la piste
+    # 4. Filtre bilatéral pour lisser la piste
     filtered = cv2.bilateralFilter(roi_sol, d=5, sigmaColor=40, sigmaSpace=40)
     
-    # 4. Seuillage TRÈS strict (on passe à 230 pour tuer le gris/imperfections)
-    _, binary_sol = cv2.threshold(filtered, 230, 255, cv2.THRESH_BINARY)
+    # 5. Seuillage strict pour éliminer les imperfections de l'asphalte
+    _, binary_sol = cv2.threshold(filtered, 225, 255, cv2.THRESH_BINARY)
     
-    # 5. Nettoyage Morphologique Intelligent
-    # On utilise une forme d'ellipse (plus naturelle pour les perspectives)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    # 6. Morphologie ciblée : On nettoie le bruit et on connecte les lignes verticalement
+    kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15)) # Noyau vertical pour boucher les trous
     
-    # Étape A : OPEN (Erosion puis Dilatation) -> Supprime les petits points isolés hors piste
-    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_OPEN, kernel)
-    
-    # Étape B : CLOSE (Dilatation puis Erosion) -> Bouche les petits trous DANS les lignes
-    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_CLOSE, kernel)
+    # Supprime les petits parasites isolés hors piste
+    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_OPEN, kernel_clean)
+    # Comble les trous dans la longueur de la bande blanche
+    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_CLOSE, kernel_vertical)
     
     # Remise dans le masque global
     clean_mask[start_y:h, :] = binary_sol
