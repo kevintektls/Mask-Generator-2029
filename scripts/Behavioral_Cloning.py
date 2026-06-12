@@ -15,6 +15,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from queue import Queue, Empty
 
 sys.path.insert(0, '/home/robotcar/Gamepad')
 
@@ -396,10 +397,10 @@ def main():
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
                         row = [f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"]
-                    try:
-                        write_queue.put_nowait((img_path, mask.copy(), row))
-                    except:
-                        pass
+                        try:
+                            write_queue.put_nowait((img_path, mask.copy(), row))
+                        except:
+                            pass
 
                     # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
