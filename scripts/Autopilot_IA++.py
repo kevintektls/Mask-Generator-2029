@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""
+Robot Car — Pilotage Autonome par Intelligence Artificielle (Behavioral Cloning)
+Plateforme : Jetson Nano 4Go (Inférence PyTorch en temps réel - Optimisé CPU)
+Logique : Vitesse dynamique (Accélération en ligne droite, Freinage en virage)
+"""
+
+from __future__ import annotations
+import os
+import sys
+import time
+import gc
+import threading
+import torch
+import torch.nn as nn
+import depthai as dai
+import cv2
+import numpy as np
+from pyvesc import VESC
+
+sys.path.insert(0, '/home/robotcar/Gamepad')
+import Gamepad
+
+# ── CONFIGURATION SYSTÈME ──────────────────────────────────────────────────────
+DISPLAY_W = 640
+DISPLAY_H = 480
+CAM_FPS   = 60
+
+# Même traitement d'image que lors de l'enregistrement
+CROP_TOP_RATIO      = 0.40  
+ULTRA_BINARY_THRESH = 220  
+
+# Configuration VESC
+VESC_PORT     = '/dev/ttyACM0'
+VESC_BAUDRATE = 115200
+VESC_TIMEOUT  = 1.0
+
+# Paramètres de conduite de l'IA
+SERVO_CENTER    = 0.5
+SERVO_RANGE     = 0.48   
+MODEL_PATH      = "../model/pilot_model.pth"
+
+# 🏎️ PARAMÈTRES DE VITESSE DYNAMIQUE
+DUTY_MIN        = 0.035  # Vitesse minimale de sécurité dans les virages serrés
+DUTY_MAX        = 0.075  # Vitesse maximale libérée en ligne droite
+STEER_THRESHOLD = 0.08   # Zone neutre de direction (écart au centre) avant de ralentir
+
+# Configuration Manette (Logitech F710 / Xbox360) pour la reprise de contrôle urgente
+GAMEPAD_TYPE = Gamepad.Xbox360
+
+
+# ── ARCHITECTURE DU RÉSEAU CNN (STRICTEMENT IDENTIQUE AU PC) ──────────────────
+class BehavioralCloningCNN(nn.Module):
+    def __init__(self):
+        super(BehavioralCloningCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 24, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(24, 36, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(36, 48, kernel_size=5, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(48, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Dropout(0.3)
+        )
+        self.flatten = nn.Flatten()
+        self.regressor = nn.Sequential(
+            nn.Linear(64 * 10 * 15, 100),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(100, 50),
+            nn.ReLU(),
+            nn.Linear(50, 1)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.flatten(x)
+        return self.regressor(x).squeeze(1)
+
+
+# ── TRAITEMENT DE VISION ──────────────────────────────────────────────────────
+def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
+    h, w = frame_gray.shape
+    clean_mask = np.zeros_like(frame_gray)
+    start_y = int(h * CROP_TOP_RATIO)
+    roi_sol = frame_gray[start_y:h, :]
+    blurred = cv2.GaussianBlur(roi_sol, (5, 5), 0)
+    _, binary_sol = cv2.threshold(blurred, ULTRA_BINARY_THRESH, 255, cv2.THRESH_BINARY)
+    clean_mask[start_y:h, :] = binary_sol
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    return cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel)
+
+
+def main():
+    print("[INFO] Initialisation de l'Autopilote IA avec Vitesse Dynamique...")
+    
+    # 1. Sélection du hardware
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[INFO] Inférence exécutée sur : {device}")
+
+    # 🚀 OPTIMISATION CPU : Empêche PyTorch de saturer l'OS
+    if device.type == "cpu":
+        torch.set_num_threads(2)
+        print("[OPTIMISATION] Nombre de threads PyTorch restreint à 2 pour préserver la Jetson.")
+
+    # 2. Chargement du modèle entraîné
+    model = BehavioralCloningCNN().to(device)
+    if not os.path.exists(MODEL_PATH):
+        print(f"[ERROR] Le fichier modèle '{MODEL_PATH}' est introuvable au chemin : {MODEL_PATH}")
+        sys.exit(1)
+        
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
+    model.eval()
+    print("[INFO] Modèle de Behavioral Cloning chargé avec succès.")
+
+    # 3. Connexion au Gamepad (Sécurité)
+    if Gamepad.available():
+        gamepad = GAMEPAD_TYPE()
+        gamepad.startBackgroundUpdates()
+        print("[INFO] Manette connectée pour sécurité (Bouton LB = Arrêt d'urgence).")
+    else:
+        gamepad = None
+        print("[WARNING] Aucune manette détectée. Arrêt d'urgence clavier uniquement.")
+
+    # 4. Connexion VESC
+    try:
+        vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
+        print("[INFO] VESC Connecté.")
+    except Exception as e:
+        print(f"[ERROR] Impossible de joindre le VESC : {e}")
+        sys.exit(1)
+
+    # 5. Pipeline Caméra DepthAI
+    pipeline = dai.Pipeline()
+    cam = pipeline.create(dai.node.MonoCamera)
+    cam.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+    cam.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
+    cam.setFps(CAM_FPS)
+    xout = pipeline.create(dai.node.XLinkOut)
+    xout.setStreamName("left")
+    xout.input.setBlocking(False)
+    xout.input.setQueueSize(2)
+    cam.out.link(xout.input)
+
+    has_display = bool(os.environ.get("DISPLAY"))
+    ai_active = True
+
+    print("\n=== 🤖 AUTOPILOTE IA DYNAMIQUE PRÊT ===")
+    print(f" -> Ligne droite maximale autorisée : {DUTY_MAX}")
+    print(f" -> Courbe minimale sécurisée : {DUTY_MIN}")
+    print(" -> Appuie sur LB sur la manette ou CTRL+C pour stopper immédiatement.\n")
+
+    with vesc:
+        vesc.set_servo(SERVO_CENTER)
+        vesc.set_duty_cycle(0)
+        time.sleep(1.0)
+
+        try:
+            with dai.Device(pipeline) as device_dai:
+                q = device_dai.getOutputQueue(name="left", maxSize=2, blocking=False)
+
+                while ai_active:
+                    # 🚨 Sécurité : Arrêt si le bouton LB est pressé
+                    if gamepad and gamepad.isConnected() and gamepad.isPressed("LB"):
+                        print("[URGENCE] Bouton LB enfoncé ! Coupure immédiate.")
+                        break
+
+                    pkt = q.tryGet()
+                    if pkt is None:
+                        time.sleep(0.002)
+                        continue
+
+                    raw = pkt.getCvFrame()
+                    mask = detect_lines(raw)
+
+                    # 🧠 Étape IA : Préparation et Inférence
+                    mask_resized = cv2.resize(mask, (160, 120))
+                    img_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0).unsqueeze(0) / 255.0
+                    img_tensor = img_tensor.to(device)
+
+                    with torch.no_grad():
+                        prediction = model(img_tensor).item()
+
+                    # Contrainte de sécurité direction (0.0 à 1.0)
+                    servo_pos = max(0.0, min(1.0, prediction))
+
+                    # 🏎️ GESTION ADAPTATIVE DE LA VITESSE
+                    steering_intensity = abs(servo_pos - SERVO_CENTER)
+
+                    if steering_intensity < STEER_THRESHOLD:
+                        # Roues relativement droites -> Accélération
+                        current_duty = DUTY_MAX
+                    else:
+                        # Roues braquées -> Calcul du
