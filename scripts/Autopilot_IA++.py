@@ -193,4 +193,35 @@ def main():
                         # Roues relativement droites -> Accélération
                         current_duty = DUTY_MAX
                     else:
-                        # Roues braquées -> Calcul du
+                        # Roues braquées -> Calcul du freinage dégressif proportionnel
+                        factor = (steering_intensity - STEER_THRESHOLD) / (SERVO_RANGE - STEER_THRESHOLD)
+                        factor = min(1.0, max(0.0, factor))  # Verrouillage [0.0, 1.0]
+                        current_duty = DUTY_MAX - factor * (DUTY_MAX - DUTY_MIN)
+
+                    # Envoi des ordres physiques synchronisés au VESC
+                    vesc.set_servo(servo_pos)
+                    vesc.set_duty_cycle(current_duty)
+
+                    # Rendu HUD
+                    if has_display:
+                        display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
+                        display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+                        status_str = f"IA CPU | Servo: {servo_pos:.2f} | Duty: {current_duty:.3f}"
+                        cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        cv2.imshow("IA Autopilot Output", display)
+                        if cv2.waitKey(1) & 0xFF == ord("q"):
+                            break
+
+        except KeyboardInterrupt:
+            print("\n[INFO] Interruption reçue.")
+        finally:
+            print("[INFO] Nettoyage et arrêt du véhicule...")
+            vesc.set_duty_cycle(0)
+            vesc.set_servo(SERVO_CENTER)
+            if gamepad:
+                gamepad.stopBackgroundUpdates()
+            cv2.destroyAllWindows()
+            gc.collect()
+
+if __name__ == "__main__":
+    main()
