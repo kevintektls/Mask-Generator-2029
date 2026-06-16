@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Robot Car — Pilotage Autonome par Intelligence Artificielle (Behavioral Cloning)
-Plateforme : Jetson Nano 4Go (Inférence PyTorch en temps réel - Optimisé CPU)
-Logique : Vitesse dynamique (Accélération en ligne droite, Freinage en virage)
+Robot Car — Pilotage Autonome Hybride (Vision Streamée & Arrêt d'Urgence Instantané)
+Plateforme : Jetson Nano 4Go (Optimisé CPU)
 """
 
 from __future__ import annotations
@@ -11,6 +10,8 @@ import sys
 import time
 import gc
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 import torch
 import torch.nn as nn
 import depthai as dai
@@ -25,52 +26,79 @@ import Gamepad
 DISPLAY_W = 640
 DISPLAY_H = 480
 CAM_FPS   = 60
+STREAM_PORT = 8080  # Port du serveur web pour voir la caméra (http://<IP>:8080)
 
-# Même traitement d'image que lors de l'enregistrement
 CROP_TOP_RATIO      = 0.20
 ULTRA_BINARY_THRESH = 220  
 
-# Configuration VESC
 VESC_PORT     = '/dev/ttyACM0'
 VESC_BAUDRATE = 115200
 VESC_TIMEOUT  = 1.0
 
-# Paramètres de conduite de l'IA
 SERVO_CENTER    = 0.5
 SERVO_RANGE     = 0.48   
 MODEL_PATH      = "../model/pilot_model.pth"
 
 # 🏎️ PARAMÈTRES DE VITESSE DYNAMIQUE
-DUTY_MIN        = 0.050  # Vitesse minimale de sécurité dans les virages serrés
-DUTY_MAX        = 0.070  # Vitesse maximale libérée en ligne droite
-STEER_THRESHOLD = 0.08   # Zone neutre de direction (écart au centre) avant de ralentir
+DUTY_MIN        = 0.050  
+DUTY_MAX        = 0.070  
+STEER_THRESHOLD = 0.08   
 
-# Configuration Manette (Logitech F710 / Xbox360) pour la reprise de contrôle urgente
 GAMEPAD_TYPE = Gamepad.Xbox360
 
+# Variable globale partagée pour le streaming vidéo
+output_frame = None
+frame_lock = threading.Lock()
 
-# ── ARCHITECTURE DU RÉSEAU CNN (STRICTEMENT IDENTIQUE AU PC) ──────────────────
+
+# ── 🌐 SERVEUR DE STREAMING VIDÉO HTTP (MJPEG) ──────────────────────────────────
+class StreamingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        global output_frame
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            try:
+                while True:
+                    with frame_lock:
+                        if output_frame is None:
+                            time.sleep(0.01)
+                            continue
+                        _, encoded_img = cv2.imencode('.jpg', output_frame)
+                        buffer = encoded_img.tobytes()
+                    
+                    self.wfile.write(b'--frame\r\n')
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.send_header('Content-Length', str(len(buffer)))
+                    self.end_headers()
+                    self.wfile.write(buffer)
+                    self.wfile.write(b'\r\n')
+                    time.sleep(1 / CAM_FPS)
+            except Exception as e:
+                pass
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Serveur HTTP supportant le multi-threading pour éviter de bloquer l'IA."""
+    allow_reuse_address = True
+
+
+# ── ARCHITECTURE DU RÉSEAU CNN ────────────────────────────────────────────────
 class BehavioralCloningCNN(nn.Module):
     def __init__(self):
         super(BehavioralCloningCNN, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(1, 24, kernel_size=5, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(24, 36, kernel_size=5, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(36, 48, kernel_size=5, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(48, 64, kernel_size=3, stride=1),
-            nn.ReLU(),
+            nn.Conv2d(1, 24, kernel_size=5, stride=2), nn.ReLU(),
+            nn.Conv2d(24, 36, kernel_size=5, stride=2), nn.ReLU(),
+            nn.Conv2d(36, 48, kernel_size=5, stride=2), nn.ReLU(),
+            nn.Conv2d(48, 64, kernel_size=3, stride=1), nn.ReLU(),
             nn.Dropout(0.3)
         )
         self.flatten = nn.Flatten()
         self.regressor = nn.Sequential(
-            nn.Linear(64 * 10 * 15, 100),
-            nn.ReLU(),
+            nn.Linear(64 * 10 * 15, 100), nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(100, 50),
-            nn.ReLU(),
+            nn.Linear(100, 50), nn.ReLU(),
             nn.Linear(50, 1)
         )
 
@@ -94,37 +122,27 @@ def detect_lines(frame_gray: np.ndarray) -> np.ndarray:
 
 
 def main():
-    print("[INFO] Initialisation de l'Autopilote IA avec Vitesse Dynamique...")
+    global output_frame
+    print("[INFO] Initialisation de l'Autopilote IA Avancé...")
     
-    # 1. Sélection du hardware
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[INFO] Inférence exécutée sur : {device}")
-
-    # 🚀 OPTIMISATION CPU : Empêche PyTorch de saturer l'OS
     if device.type == "cpu":
         torch.set_num_threads(2)
-        print("[OPTIMISATION] Nombre de threads PyTorch restreint à 2 pour préserver la Jetson.")
 
-    # 2. Chargement du modèle entraîné
+    # 1. Modèle
     model = BehavioralCloningCNN().to(device)
     if not os.path.exists(MODEL_PATH):
-        print(f"[ERROR] Le fichier modèle '{MODEL_PATH}' est introuvable au chemin : {MODEL_PATH}")
+        print(f"[ERROR] Modèle introuvable : {MODEL_PATH}")
         sys.exit(1)
-        
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
     model.eval()
-    print("[INFO] Modèle de Behavioral Cloning chargé avec succès.")
 
-    # 3. Connexion au Gamepad (Sécurité)
-    if Gamepad.available():
-        gamepad = GAMEPAD_TYPE()
+    # 2. Sécurités & Hardware
+    gamepad = GAMEPAD_TYPE() if Gamepad.available() else None
+    if gamepad: 
         gamepad.startBackgroundUpdates()
-        print("[INFO] Manette connectée pour sécurité (Bouton LB = Arrêt d'urgence).")
-    else:
-        gamepad = None
-        print("[WARNING] Aucune manette détectée. Arrêt d'urgence clavier uniquement.")
-
-    # 4. Connexion VESC
+        print("[INFO] Manette connectée.")
+    
     try:
         vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
         print("[INFO] VESC Connecté.")
@@ -132,7 +150,13 @@ def main():
         print(f"[ERROR] Impossible de joindre le VESC : {e}")
         sys.exit(1)
 
-    # 5. Pipeline Caméra DepthAI
+    # 3. Lancement du serveur Web de streaming en tâche de fond
+    server = ThreadedHTTPServer(('0.0.0.0', STREAM_PORT), StreamingHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    print(f"[LIVE] Flux vidéo disponible sur http://localhost:{STREAM_PORT} (ou l'IP de la Jetson)")
+
+    # 4. Pipeline DepthAI
     pipeline = dai.Pipeline()
     cam = pipeline.create(dai.node.MonoCamera)
     cam.setBoardSocket(dai.CameraBoardSocket.CAM_B)
@@ -140,17 +164,10 @@ def main():
     cam.setFps(CAM_FPS)
     xout = pipeline.create(dai.node.XLinkOut)
     xout.setStreamName("left")
-    xout.input.setBlocking(False)
-    xout.input.setQueueSize(2)
     cam.out.link(xout.input)
 
-    has_display = bool(os.environ.get("DISPLAY"))
-    ai_active = True
-
-    print("\n=== 🤖 AUTOPILOTE IA DYNAMIQUE PRÊT ===")
-    print(f" -> Ligne droite maximale autorisée : {DUTY_MAX}")
-    print(f" -> Courbe minimale sécurisée : {DUTY_MIN}")
-    print(" -> Appuie sur LB sur la manette ou CTRL+C pour stopper immédiatement.\n")
+    print("\n=== 🤖 AUTOPILOTE OPÉRATIONNEL ===")
+    print(" -> LB enfoncé : FREINAGE D'URGÈNCE ÉLECTRIQUE IMMÉDIAT.")
 
     with vesc:
         vesc.set_servo(SERVO_CENTER)
@@ -161,10 +178,13 @@ def main():
             with dai.Device(pipeline) as device_dai:
                 q = device_dai.getOutputQueue(name="left", maxSize=2, blocking=False)
 
-                while ai_active:
-                    # 🚨 Sécurité : Arrêt si le bouton LB est pressé
+                while True:
+                    # 🚨 ARRÊT D'URGENCE CRITIQUE INTERNE ET FORCE
                     if gamepad and gamepad.isConnected() and gamepad.isPressed("LB"):
-                        print("[URGENCE] Bouton LB enfoncé ! Coupure immédiate.")
+                        print("\n[🚨 URGENCE KRITIK] Bouton LB détecté ! Application du frein moteur direct !")
+                        # Ordre de freinage immédiat au VESC (Courant de freinage inverse à 15A pour bloquer les roues)
+                        vesc.set_brake(15.0) 
+                        vesc.set_servo(SERVO_CENTER)
                         break
 
                     pkt = q.tryGet()
@@ -175,51 +195,51 @@ def main():
                     raw = pkt.getCvFrame()
                     mask = detect_lines(raw)
 
-                    # 🧠 Étape IA : Préparation et Inférence
+                    # Inférence IA
                     mask_resized = cv2.resize(mask, (160, 120))
-                    img_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0).unsqueeze(0) / 255.0
-                    img_tensor = img_tensor.to(device)
+                    img_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0).unsqueeze(0).to(device) / 255.0
 
                     with torch.no_grad():
                         prediction = model(img_tensor).item()
 
-                    # Contrainte de sécurité direction (0.0 à 1.0)
                     servo_pos = max(0.0, min(1.0, prediction))
 
-                    # 🏎️ GESTION ADAPTATIVE DE LA VITESSE
+                    # Vitesse adaptative
                     steering_intensity = abs(servo_pos - SERVO_CENTER)
-
                     if steering_intensity < STEER_THRESHOLD:
-                        # Roues relativement droites -> Accélération
                         current_duty = DUTY_MAX
                     else:
-                        # Roues braquées -> Calcul du freinage dégressif proportionnel
                         factor = (steering_intensity - STEER_THRESHOLD) / (SERVO_RANGE - STEER_THRESHOLD)
-                        factor = min(1.0, max(0.0, factor))  # Verrouillage [0.0, 1.0]
+                        factor = min(1.0, max(0.0, factor))
                         current_duty = DUTY_MAX - factor * (DUTY_MAX - DUTY_MIN)
 
-                    # Envoi des ordres physiques synchronisés au VESC
+                    # Envoi des consignes physiques standard
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(current_duty)
 
-                    # Rendu HUD
-                    if has_display:
-                        display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
-                        display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-                        status_str = f"IA CPU | Servo: {servo_pos:.2f} | Duty: {current_duty:.3f}"
-                        cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                        cv2.imshow("IA Autopilot Output", display)
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
-                            break
+                    # 🌐 PRÉPARATION DU FLUX STREAMING (Met à jour l'image partagée)
+                    display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
+                    display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
+                    status_str = f"Servo: {servo_pos:.2f} | Duty: {current_duty:.3f}"
+                    cv2.putText(display, status_str, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    
+                    with frame_lock:
+                        output_frame = display.copy()
 
         except KeyboardInterrupt:
-            print("\n[INFO] Interruption reçue.")
+            print("\n[INFO] Interruption manuelle demandée.")
         finally:
-            print("[INFO] Nettoyage et arrêt du véhicule...")
-            vesc.set_duty_cycle(0)
-            vesc.set_servo(SERVO_CENTER)
+            print("[INFO] Extinction propre des systèmes...")
+            # On force la coupure complète en sortie
+            try:
+                vesc.set_duty_cycle(0)
+                vesc.set_brake(10.0)
+                vesc.set_servo(SERVO_CENTER)
+            except:
+                pass
             if gamepad:
                 gamepad.stopBackgroundUpdates()
+            server.shutdown()
             cv2.destroyAllWindows()
             gc.collect()
 
