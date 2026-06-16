@@ -53,7 +53,7 @@ CAM_FPS   = 30
 HTTP_PORT = 5000
 
 # ✂️ Rognage horizon & Seuil ultra-binaire
-CROP_TOP_RATIO      = 0.45  # Légèrement descendu pour éviter les bruits lointains
+CROP_TOP_RATIO      = 0.20  # Légèrement descendu pour éviter les bruits lointains
 ULTRA_BINARY_THRESH = 215   # Ajusté pour être un poil plus tolérant avec la fusion
 
 # Zones de vision pour l'algo géométrique classique
