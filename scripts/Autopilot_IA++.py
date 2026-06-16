@@ -27,7 +27,7 @@ DISPLAY_H = 480
 CAM_FPS   = 60
 
 # Même traitement d'image que lors de l'enregistrement
-CROP_TOP_RATIO      = 0.20  
+CROP_TOP_RATIO      = 0.20
 ULTRA_BINARY_THRESH = 220  
 
 # Configuration VESC
@@ -37,12 +37,12 @@ VESC_TIMEOUT  = 1.0
 
 # Paramètres de conduite de l'IA
 SERVO_CENTER    = 0.5
-SERVO_RANGE     = 0.48
+SERVO_RANGE     = 0.48   
 MODEL_PATH      = "../model/pilot_model.pth"
 
 # 🏎️ PARAMÈTRES DE VITESSE DYNAMIQUE
-DUTY_MIN        = 0.1  # Vitesse minimale de sécurité dans les virages serrés
-DUTY_MAX        = 0.2  # Vitesse maximale libérée en ligne droite
+DUTY_MIN        = 0.050  # Vitesse minimale de sécurité dans les virages serrés
+DUTY_MAX        = 0.070  # Vitesse maximale libérée en ligne droite
 STEER_THRESHOLD = 0.08   # Zone neutre de direction (écart au centre) avant de ralentir
 
 # Configuration Manette (Logitech F710 / Xbox360) pour la reprise de contrôle urgente
