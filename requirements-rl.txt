@@ -1,0 +1,12 @@
+# PyTorch CUDA (RTX 3070) — installer AVANT le reste :
+#   py -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+#
+# Puis :
+#   py -m pip install -r requirements-rl.txt
+
+opencv-python>=4.8
+numpy>=1.24
+gymnasium>=0.29
+stable-baselines3>=2.3
+tqdm
+rich
