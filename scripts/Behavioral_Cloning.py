@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue, Empty
+from vision_preprocess import make_mask_stereo
 
 sys.path.insert(0, '/home/robotcar/Gamepad')
 
@@ -115,58 +116,7 @@ def apply_deadzone(value: float) -> float:
 
 # ── Vision Stéréo Ultra-Binaire Nettoyée ──────────────────────────────────────
 
-def detect_lines_stereo(frame_left: np.ndarray, frame_right: np.ndarray) -> np.ndarray:
-    """
-    Version Stéréo Alignée : Aligne l'image droite sur la gauche 
-    pour éliminer l'effet de parallaxe avant la fusion.
-    """
-    h, w = frame_left.shape
-    
-    # ── 🎛️ PARAMÈTRES D'ALIGNEMENT MANUEL ──────────────────────────────────────
-    # Ajuste ces valeurs en regardant ton flux vidéo pour superposer les deux yeux
-    dx    = -15.0   # Déplacement horizontal (en pixels) pour corriger l'écartement
-    dy    = -5.0    # Déplacement vertical (en pixels) si la caméra droite est surélevée
-    angle = 0.0     # Rotation (en degrés) si une caméra est légèrement de biais
-    # ──────────────────────────────────────────────────────────────────────────
 
-    # 1. Calcul et application de la matrice de correction pour l'image droite
-    # On prend le centre de l'image comme pivot pour la rotation
-    center = (w / 2, h / 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    M[0, 2] += dx  # Applique la translation X
-    M[1, 2] += dy  # Applique la translation Y
-    
-    # Transformation de l'image droite pour l'aligner sur la gauche
-    frame_right_aligned = cv2.warpAffine(frame_right, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-
-    # 2. Fusion par Maximum (Maintenant que c'est aligné, les lignes se superposent !)
-    merged = cv2.max(frame_left, frame_right_aligned)
-    
-    clean_mask = np.zeros_like(merged)
-    
-    # 3. Rognage horizon
-    start_y = int(h * CROP_TOP_RATIO)
-    roi_sol = merged[start_y:h, :]
-    
-    # 4. Filtre bilatéral pour lisser la piste
-    filtered = cv2.bilateralFilter(roi_sol, d=5, sigmaColor=40, sigmaSpace=40)
-    
-    # 5. Seuillage strict pour éliminer les imperfections de l'asphalte
-    _, binary_sol = cv2.threshold(filtered, 225, 255, cv2.THRESH_BINARY)
-    
-    # 6. Morphologie ciblée : On nettoie le bruit et on connecte les lignes verticalement
-    kernel_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15)) # Noyau vertical pour boucher les trous
-    
-    # Supprime les petits parasites isolés hors piste
-    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_OPEN, kernel_clean)
-    # Comble les trous dans la longueur de la bande blanche
-    binary_sol = cv2.morphologyEx(binary_sol, cv2.MORPH_CLOSE, kernel_vertical)
-    
-    # Remise dans le masque global
-    clean_mask[start_y:h, :] = binary_sol
-    
-    return clean_mask
 
 
 def _get_band_center(mask: np.ndarray, y_top: int, y_bot: int) -> tuple[float | None, int, int, str]:
@@ -423,7 +373,7 @@ def main():
                         t0 = now
 
                     # Appel de notre fonction de traitement stéréo ultra-propre
-                    mask = detect_lines_stereo(raw_left, raw_right)
+                    mask = make_mask_stereo(raw_left, raw_right)
 
                     if autonomous_mode:
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
