@@ -94,7 +94,7 @@ fn run_loop(
         }
 
         let Some(gray) = camera.try_get_gray()? else {
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_micros(500));
             continue;
         };
 

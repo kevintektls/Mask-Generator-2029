@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use autopilot_config::{CAMERA_BRIDGE_MAGIC, MONO_H, MONO_W};
-use image::{GrayImage, Luma};
+use image::GrayImage;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -26,32 +26,35 @@ impl MonoCamera {
             .with_context(|| format!("connecting to camera bridge at {addr}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(2)))?;
         stream.set_nonblocking(true)?;
+        stream.set_nodelay(true)?;
         tracing::info!("camera bridge connected at {addr}");
         Ok(Self {
             stream,
             rx_buf: Vec::with_capacity(MONO_W as usize * MONO_H as usize + HEADER_LEN),
-            scratch: vec![0u8; 4096],
+            scratch: vec![0u8; 256 * 1024],
         })
     }
 
-    /// Non-blocking frame grab; returns `None` if no full frame is available yet.
+    /// Non-blocking frame grab; returns the freshest frame if several are buffered.
     pub fn try_get_gray(&mut self) -> Result<Option<GrayImage>> {
         loop {
-            if let Some(frame) = self.decode_frame()? {
-                return Ok(Some(frame));
-            }
-
             match self.stream.read(&mut self.scratch) {
                 Ok(0) => bail!("camera bridge closed the connection"),
                 Ok(n) => self.rx_buf.extend_from_slice(&self.scratch[..n]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
                 Err(e) => return Err(e.into()),
             }
         }
+
+        let mut latest = None;
+        while let Some(frame) = self.decode_one_frame()? {
+            latest = Some(frame);
+        }
+        Ok(latest)
     }
 
-    fn decode_frame(&mut self) -> Result<Option<GrayImage>> {
+    fn decode_one_frame(&mut self) -> Result<Option<GrayImage>> {
         loop {
             if self.rx_buf.len() < HEADER_LEN {
                 return Ok(None);
@@ -76,12 +79,10 @@ impl MonoCamera {
                 return Ok(None);
             }
 
-            let pixels = &self.rx_buf[HEADER_LEN..total];
-            let mut img = GrayImage::new(w, h);
-            for (i, px) in img.pixels_mut().enumerate() {
-                *px = Luma([pixels[i]]);
-            }
+            let pixels = self.rx_buf[HEADER_LEN..total].to_vec();
             self.rx_buf.drain(..total);
+            let img = GrayImage::from_raw(w, h, pixels)
+                .context("invalid grayscale frame buffer")?;
             return Ok(Some(img));
         }
     }

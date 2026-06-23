@@ -43,6 +43,30 @@ cargo build --release -p autopilot
 
 Fast build — no `depthai-sys`, no `opencv-rust`.
 
+### Cross-compile from Mac (optional)
+
+`cargo build --target aarch64-unknown-linux-gnu` fails on macOS because `serialport` / `gilrs` need **Linux `libudev`** and host `pkg-config` cannot cross-resolve it.
+
+**Recommended** — Docker + [cross](https://github.com/cross-rs/cross):
+
+```bash
+# Install Docker Desktop, then:
+cargo install cross --git https://github.com/cross-rs/cross
+cd autopilot
+bash scripts/build_jetson_cross.sh
+scp target/aarch64-unknown-linux-gnu/release/autopilot robotcar@<jetson-ip>:~/Mask-Generator-2029/autopilot/target/release/
+```
+
+**Without Docker** — sync a minimal sysroot from the Jetson:
+
+```bash
+JETSON=robotcar@<jetson-ip> bash scripts/sync_jetson_sysroot.sh
+export JETSON_SYSROOT=$HOME/jetson-sysroot
+bash scripts/build_jetson_cross.sh
+```
+
+**Simplest** — build directly on the Jetson: `bash scripts/build_jetson.sh`
+
 ## Run
 
 **Terminal 1** — camera bridge (keep running):
@@ -86,6 +110,7 @@ python3 tools/verify_model.py
 | Build still mentions `depthai-sys` | Code not updated; `git pull origin dev`, then `cargo clean` |
 | `connecting to camera bridge` failed | Start `python3 tools/camera_bridge.py` first |
 | `depthai not installed` | `pip install depthai==2.29.0` |
-| `libudev` build error | `sudo apt install libudev-dev` |
+| `libudev` build error | `sudo apt install libudev-dev` (Jetson) |
+| Mac cross-compile `pkg-config has not been configured to support cross-compilation` | Use `bash scripts/build_jetson_cross.sh` (Docker + `cross`) or `sync_jetson_sysroot.sh` — see README |
 | VESC permission denied | `sudo usermod -aG dialout $USER`, re-login |
 | No gamepad e-stop | Connect Xbox pad; autopilot runs without it |
