@@ -7,16 +7,15 @@ Hybrid autonomous driving: DepthAI mono camera → lane mask → behavioral-clon
 ## Architecture
 
 ```
-Python camera_bridge.py (depthai 2.29, CAM_B 480p)
-    → TCP :9000 gray frames
-    → detect_lines (image/imageproc)
-    → BehavioralCloningCNN (Candle)
+Python camera_bridge.py (depthai stereo + vision_preprocess OpenCV)
+    → TCP :9000 160x120 masks
+    → BehavioralCloningCNN (Candle) — vision algo runs in Python
     → VESC (servo + duty)
     ↔ MJPEG :8080
     ↔ Gamepad LB (e-stop)
 ```
 
-The Rust build **does not compile DepthAI-Core** (too heavy / CMake ≥ 3.20 required on Jetson). Camera uses the existing Python `depthai==2.29.0` stack via [`tools/camera_bridge.py`](tools/camera_bridge.py).
+The Rust build **does not compile DepthAI-Core**. Camera + lane mask use the same Python stack as [`scripts/Autopilot_IA++.py`](../scripts/Autopilot_IA++.py) via [`tools/camera_bridge.py`](tools/camera_bridge.py) (`make_mask_stereo` from `vision_preprocess.py`).
 
 ## Jetson prerequisites
 
@@ -28,7 +27,6 @@ source "$HOME/.cargo/env"
 # Build deps (no OpenCV / no depthai-sys)
 bash scripts/install_jetson_deps.sh
 
-# Python camera (already on your Jetson for Autopilot_IA++.py)
 pip install depthai==2.29.0 opencv-python numpy
 
 sudo usermod -aG dialout "$USER"   # VESC serial
@@ -73,7 +71,7 @@ bash scripts/build_jetson_cross.sh
 
 ```bash
 cd autopilot
-python3 tools/camera_bridge.py --fps 60
+python3 tools/camera_bridge.py --fps 30
 ```
 
 **Terminal 2** — autopilot:

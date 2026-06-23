@@ -1,15 +1,16 @@
-//! Grayscale camera frames over TCP from the Python DepthAI bridge.
+//! Model-ready lane masks over TCP from the Python vision bridge.
 
 use anyhow::{bail, Context, Result};
-use autopilot_config::{CAMERA_BRIDGE_MAGIC, MONO_H, MONO_W};
+use autopilot_config::{CAMERA_BRIDGE_MAGIC, MASK_H, MASK_W};
 use image::GrayImage;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 const HEADER_LEN: usize = 4 + 4 + 4; // magic + w + h
+const FRAME_BYTES: usize = (MASK_W * MASK_H) as usize;
 
-/// TCP client for mono frames published by `tools/camera_bridge.py`.
+/// TCP client for 160x120 masks from `tools/camera_bridge.py` (vision_preprocess).
 pub struct MonoCamera {
     stream: TcpStream,
     rx_buf: Vec<u8>,
@@ -30,13 +31,13 @@ impl MonoCamera {
         tracing::info!("camera bridge connected at {addr}");
         Ok(Self {
             stream,
-            rx_buf: Vec::with_capacity(MONO_W as usize * MONO_H as usize + HEADER_LEN),
-            scratch: vec![0u8; 256 * 1024],
+            rx_buf: Vec::with_capacity(FRAME_BYTES + HEADER_LEN + 4096),
+            scratch: vec![0u8; 64 * 1024],
         })
     }
 
-    /// Non-blocking frame grab; returns the freshest frame if several are buffered.
-    pub fn try_get_gray(&mut self) -> Result<Option<GrayImage>> {
+    /// Latest 160x120 mask from the bridge; drops older buffered frames.
+    pub fn try_get_mask(&mut self) -> Result<Option<GrayImage>> {
         loop {
             match self.stream.read(&mut self.scratch) {
                 Ok(0) => bail!("camera bridge closed the connection"),
@@ -65,9 +66,8 @@ impl MonoCamera {
                     self.rx_buf.drain(..idx);
                     continue;
                 }
-                // Partial header or garbage — wait for more bytes instead of aborting.
-                if self.rx_buf.len() > 1 << 20 {
-                    tracing::warn!("camera bridge: clearing oversized desync buffer");
+                if self.rx_buf.len() > 256 * 1024 {
+                    tracing::warn!("camera bridge: clearing desync buffer");
                     self.rx_buf.clear();
                 }
                 return Ok(None);
@@ -75,15 +75,13 @@ impl MonoCamera {
 
             let w = u32::from_le_bytes(self.rx_buf[4..8].try_into().unwrap());
             let h = u32::from_le_bytes(self.rx_buf[8..12].try_into().unwrap());
-            if w != MONO_W || h != MONO_H {
-                tracing::warn!("camera bridge: unexpected frame size {w}x{h}, resyncing");
+            if w != MASK_W || h != MASK_H {
+                tracing::warn!("camera bridge: unexpected frame {w}x{h}, resyncing");
                 self.rx_buf.drain(..4);
                 continue;
             }
-            let payload = (w as usize)
-                .checked_mul(h as usize)
-                .context("invalid frame dimensions")?;
-            let total = HEADER_LEN + payload;
+
+            let total = HEADER_LEN + FRAME_BYTES;
             if self.rx_buf.len() < total {
                 return Ok(None);
             }
@@ -91,7 +89,7 @@ impl MonoCamera {
             let pixels = self.rx_buf[HEADER_LEN..total].to_vec();
             self.rx_buf.drain(..total);
             let img = GrayImage::from_raw(w, h, pixels)
-                .context("invalid grayscale frame buffer")?;
+                .context("invalid mask frame buffer")?;
             return Ok(Some(img));
         }
     }
@@ -102,8 +100,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mono_resolution_constants() {
-        assert_eq!(MONO_W, 640);
-        assert_eq!(MONO_H, 480);
+    fn bridge_mask_dimensions() {
+        assert_eq!(MASK_W, 160);
+        assert_eq!(MASK_H, 120);
+        assert_eq!(FRAME_BYTES, 19_200);
     }
 }

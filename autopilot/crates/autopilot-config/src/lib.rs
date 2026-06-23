@@ -6,14 +6,12 @@ use std::path::PathBuf;
 // ── Display / stream ─────────────────────────────────────────────────────────
 pub const DISPLAY_W: u32 = 640;
 pub const DISPLAY_H: u32 = 480;
-pub const CAM_FPS: u32 = 60;
+pub const CAM_FPS: u32 = 30;
 pub const STREAM_PORT: u16 = 8080;
 
-// ── Camera bridge (Python depthai 2.x) ───────────────────────────────────────
-pub const MONO_W: u32 = 640;
-pub const MONO_H: u32 = 480;
+// ── Camera bridge (Python depthai 2.x + vision_preprocess) ───────────────────
 pub const CAMERA_BRIDGE_ADDR: &str = "127.0.0.1:9000";
-pub const CAMERA_BRIDGE_MAGIC: &[u8; 4] = b"OAK1";
+pub const CAMERA_BRIDGE_MAGIC: &[u8; 4] = b"MASK";
 
 // ── Vision ───────────────────────────────────────────────────────────────────
 pub const CROP_TOP_RATIO: f64 = 0.20;

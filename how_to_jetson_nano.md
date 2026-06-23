@@ -12,7 +12,7 @@ Connect from your laptop/computer to <jetson-ip>:8080
 If you see depthai-sys / CMake errors: bash autopilot/scripts/fix_jetson_depthai_build.sh
 Otherwise: cd autopilot && bash scripts/install_jetson_deps.sh && bash scripts/build_jetson.sh
 Run (2 terminals):
-  python3 autopilot/tools/camera_bridge.py --fps 60
+  python3 autopilot/tools/camera_bridge.py --fps 30
   ./autopilot/target/release/autopilot --model model/pilot_model.pth
 Stream: http://<jetson-ip>:8080 — LB = emergency brake.
 
@@ -21,7 +21,7 @@ Install: bash autopilot_cpp/scripts/install_jetson_deps.sh
 Export model (once): python3 autopilot_cpp/tools/export_onnx.py
 Build: cd autopilot_cpp && bash scripts/build_jetson.sh
 Run (2 terminals):
-  python3 autopilot/tools/camera_bridge.py --fps 60
+  python3 autopilot/tools/camera_bridge.py --fps 30
   ./autopilot_cpp/build/autopilot_cpp --model model/pilot_model.onnx
 See autopilot_cpp/README.md for details.
 

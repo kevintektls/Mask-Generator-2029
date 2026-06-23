@@ -55,5 +55,5 @@ bash scripts/build_jetson.sh
 echo ""
 echo "[autopilot] Done. Run in two terminals:"
 echo "  cd $AUTOPILOT_DIR"
-echo "  python3 tools/camera_bridge.py --fps 60"
+echo "  python3 tools/camera_bridge.py --fps 30"
 echo "  ./target/release/autopilot --model ../model/pilot_model.pth"

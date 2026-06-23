@@ -28,11 +28,23 @@ pub fn detect_lines(frame_gray: &GrayImage) -> GrayImage {
 
 /// Resize mask to model input and normalize to `[0, 1]`.
 pub fn mask_to_input(mask: &GrayImage) -> Result<Vec<f32>> {
-    let resized = image::imageops::resize(mask, MASK_W, MASK_H, FilterType::Triangle);
+    let resized = if mask.dimensions() == (MASK_W, MASK_H) {
+        mask.clone()
+    } else {
+        image::imageops::resize(mask, MASK_W, MASK_H, FilterType::Triangle)
+    };
     Ok(resized
         .pixels()
         .map(|p| p[0] as f32 / 255.0)
         .collect())
+}
+
+/// Upscale a model mask for MJPEG display.
+pub fn upscale_mask_for_display(mask: &GrayImage) -> GrayImage {
+    if mask.dimensions() == (DISPLAY_W, DISPLAY_H) {
+        return mask.clone();
+    }
+    image::imageops::resize(mask, DISPLAY_W, DISPLAY_H, FilterType::Triangle)
 }
 
 /// Build an RGB display frame with status overlay for MJPEG streaming.

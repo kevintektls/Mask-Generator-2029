@@ -6,7 +6,7 @@ use autopilot_config::{adaptive_duty, Cli, EMERGENCY_BRAKE_A};
 use autopilot_input::GamepadMonitor;
 use autopilot_model::load_model;
 use autopilot_stream::{encode_jpeg, publish_frame, start_server, FrameBuffer};
-use autopilot_vision::{build_display_frame, detect_lines, mask_to_input};
+use autopilot_vision::{build_display_frame, mask_to_input, upscale_mask_for_display};
 use autopilot_vesc::VescClient;
 use clap::Parser;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,12 +93,11 @@ fn run_loop(
             }
         }
 
-        let Some(gray) = camera.try_get_gray()? else {
-            std::thread::sleep(Duration::from_micros(500));
+        let Some(mask) = camera.try_get_mask()? else {
+            std::thread::sleep(Duration::from_millis(2));
             continue;
         };
 
-        let mask = detect_lines(&gray);
         let input = mask_to_input(&mask)?;
         let prediction = model.predict_flat(&input)?;
         let servo_pos = prediction.clamp(0.0, 1.0);
@@ -107,7 +106,8 @@ fn run_loop(
         vesc.set_servo(servo_pos)?;
         vesc.set_duty(current_duty)?;
 
-        let display = build_display_frame(&mask, servo_pos, current_duty)?;
+        let display_mask = upscale_mask_for_display(&mask);
+        let display = build_display_frame(&display_mask, servo_pos, current_duty)?;
         if let Ok(jpeg) = encode_jpeg(&display) {
             publish_frame(frame_buffer, jpeg);
         }

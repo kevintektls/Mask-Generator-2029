@@ -14,7 +14,7 @@ if [[ ! -x target/release/autopilot ]]; then
 fi
 
 echo "[autopilot] Start camera bridge in another terminal:"
-echo "  python3 tools/camera_bridge.py --fps 60"
+echo "  python3 tools/camera_bridge.py --fps 30"
 echo ""
 echo "[autopilot] Waiting 3s for bridge (Ctrl+C to abort)..."
 sleep 3
