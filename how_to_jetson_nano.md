@@ -9,12 +9,21 @@ Plug in camera (OAK-D Lite) and run the 'camera_website.py' script found in came
 Connect from your laptop/computer to <jetson-ip>:8080
 
 [Autopilot Rust]
-Install build deps: cd autopilot && bash scripts/install_jetson_deps.sh
-Build: cd autopilot && cargo build --release -p autopilot
+If you see depthai-sys / CMake errors: bash autopilot/scripts/fix_jetson_depthai_build.sh
+Otherwise: cd autopilot && bash scripts/install_jetson_deps.sh && bash scripts/build_jetson.sh
 Run (2 terminals):
   python3 autopilot/tools/camera_bridge.py --fps 60
   ./autopilot/target/release/autopilot --model model/pilot_model.pth
 Stream: http://<jetson-ip>:8080 — LB = emergency brake.
+
+[Autopilot C++ — faster build on Jetson]
+Install: bash autopilot_cpp/scripts/install_jetson_deps.sh
+Export model (once): python3 autopilot_cpp/tools/export_onnx.py
+Build: cd autopilot_cpp && bash scripts/build_jetson.sh
+Run (2 terminals):
+  python3 autopilot/tools/camera_bridge.py --fps 60
+  ./autopilot_cpp/build/autopilot_cpp --model model/pilot_model.onnx
+See autopilot_cpp/README.md for details.
 
 [VNC]
 Run in jetson nano terminal: 'x11vnc -display :0 -forever -nopw -listen 0.0.0.0 -rfbport 5900'
