@@ -15,9 +15,7 @@ check() {
   fi
 }
 
-check "clang" clang --version
 check "pkg-config" pkg-config --version
-check "opencv4 (pkg-config)" pkg-config --exists opencv4
 check "libudev (pkg-config)" pkg-config --exists libudev
 check "cmake" cmake --version
 check "git" git --version

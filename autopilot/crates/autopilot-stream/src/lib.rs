@@ -11,7 +11,8 @@ use axum::{
     Router,
 };
 use futures_util::stream;
-use opencv::{core::Vector, imgcodecs, prelude::*};
+use image::{ImageEncoder, RgbImage};
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -23,12 +24,12 @@ struct AppState {
     frame: FrameBuffer,
 }
 
-/// Encode a BGR OpenCV `Mat` to JPEG bytes.
-pub fn encode_jpeg(bgr: &Mat) -> Result<Vec<u8>> {
-    let mut buf = Vector::<u8>::new();
-    let params = Vector::from_slice(&[imgcodecs::IMWRITE_JPEG_QUALITY, 85]);
-    imgcodecs::imencode(".jpg", bgr, &mut buf, &params)?;
-    Ok(buf.to_vec())
+/// Encode an RGB frame to JPEG bytes.
+pub fn encode_jpeg(rgb: &RgbImage) -> Result<Vec<u8>> {
+    let mut buf = Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    encoder.write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)?;
+    Ok(buf.into_inner())
 }
 
 /// Publish a new frame to the shared buffer.

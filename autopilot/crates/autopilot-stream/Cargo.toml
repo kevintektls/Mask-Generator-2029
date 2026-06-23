@@ -8,6 +8,6 @@ anyhow.workspace = true
 autopilot-config.workspace = true
 axum.workspace = true
 futures-util = "0.3"
-opencv.workspace = true
+image.workspace = true
 tokio.workspace = true
 tracing.workspace = true

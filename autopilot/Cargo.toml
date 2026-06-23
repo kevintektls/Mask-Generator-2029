@@ -27,11 +27,6 @@ thiserror = "2"
 candle-core = "0.8"
 candle-nn = "0.8"
 
-opencv = { version = "0.94", default-features = false, features = [
-    "imgproc",
-    "imgcodecs",
-] }
-
 serialport = "4"
 vesc = "0.4"
 

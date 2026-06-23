@@ -9,12 +9,10 @@ use autopilot_stream::{encode_jpeg, publish_frame, start_server, FrameBuffer};
 use autopilot_vision::{build_display_frame, detect_lines, mask_to_input};
 use autopilot_vesc::VescClient;
 use clap::Parser;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -100,7 +98,7 @@ fn run_loop(
             continue;
         };
 
-        let mask = detect_lines(&gray)?;
+        let mask = detect_lines(&gray);
         let input = mask_to_input(&mask)?;
         let prediction = model.predict_flat(&input)?;
         let servo_pos = prediction.clamp(0.0, 1.0);

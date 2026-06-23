@@ -7,10 +7,11 @@ use depthai::{
     device::Device,
     pipeline::Pipeline,
 };
-use opencv::core::Mat;
+use image::{GrayImage, Luma};
 
 const MONO_W: u32 = 640;
 const MONO_H: u32 = 480;
+
 /// OAK-D Lite left mono camera stream.
 pub struct MonoCamera {
     _device: Device,
@@ -50,15 +51,15 @@ impl MonoCamera {
     }
 
     /// Non-blocking frame grab; returns `None` if the queue is empty.
-    pub fn try_get_gray(&self) -> Result<Option<Mat>> {
+    pub fn try_get_gray(&self) -> Result<Option<GrayImage>> {
         match self.queue.try_next()? {
-            Some(frame) => Ok(Some(frame_to_mat(&frame)?)),
+            Some(frame) => Ok(Some(frame_to_gray(&frame)?)),
             None => Ok(None),
         }
     }
 }
 
-fn frame_to_mat(frame: &ImageFrame) -> Result<Mat> {
+fn frame_to_gray(frame: &ImageFrame) -> Result<GrayImage> {
     let w = frame.width();
     let h = frame.height();
     let bytes = frame.bytes();
@@ -70,14 +71,14 @@ fn frame_to_mat(frame: &ImageFrame) -> Result<Mat> {
         expected
     );
 
-    let mat = Mat::from_slice(&bytes[..expected])
-        .context("creating Mat from frame bytes")?
-        .reshape(1, h as i32)
-        .context("reshaping frame")?
-        .try_clone()
-        .context("cloning frame Mat")?;
-
-    Ok(mat)
+    let mut img = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            img.put_pixel(x, y, Luma([bytes[idx]]));
+        }
+    }
+    Ok(img)
 }
 
 #[cfg(test)]

@@ -17,7 +17,6 @@ autopilot-stream.workspace = true
 autopilot-vision.workspace = true
 autopilot-vesc.workspace = true
 clap.workspace = true
-opencv.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

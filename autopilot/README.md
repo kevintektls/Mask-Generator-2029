@@ -35,12 +35,13 @@ Workspace crates:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 
-# System deps (OpenCV + gamepad/evdev + DepthAI build toolchain)
+# System deps (gamepad/evdev + DepthAI build toolchain; OpenCV not required for Rust build)
 sudo apt-get update
 sudo apt-get install -y \
   build-essential cmake git pkg-config \
-  libopencv-dev clang libclang-dev \
-  libudev-dev libssl-dev
+  clang libclang-dev \
+  libudev-dev libssl-dev \
+  fonts-dejavu-core
 
 # Or use the helper script:
 # bash scripts/install_jetson_deps.sh
@@ -56,11 +57,11 @@ sudo usermod -aG dialout "$USER"
 
 ```bash
 cd autopilot
-bash scripts/check_build_env.sh   # optional pre-flight (needs clang + opencv4)
+bash scripts/check_build_env.sh   # optional pre-flight
 cargo build --release -p autopilot
 ```
 
-`opencv` crate generates Rust bindings at compile time and **requires `clang` in PATH** (`sudo apt install clang libclang-dev`). On older Jetson images only `clang-8` may exist — `install_jetson_deps.sh` symlinks it automatically.
+`opencv` is **not** used — vision runs in pure Rust (`image` + `imageproc`), which avoids fragile `opencv-rust` binding generation on Jetson.
 
 First build can take **30–60+ minutes** on Jetson Nano while `depthai-sys` compiles DepthAI-Core. Subsequent builds reuse `target/dai-build/`.
 
@@ -116,9 +117,8 @@ The Python script uses `depthai==2.29.0`. This Rust project uses **DepthAI-Core 
 
 | Issue | Fix |
 |---|---|
-| `Can't find clang binary` (opencv build) | `sudo apt install clang libclang-dev` then `clang --version`; or `bash scripts/install_jetson_deps.sh` |
-| `libudev` / `libudev-sys` build error | `sudo apt install libudev-dev pkg-config` (or `bash scripts/install_jetson_deps.sh`) |
+| `libudev` / `libudev-sys` build error | `sudo apt install libudev-dev` or `bash scripts/install_jetson_deps.sh` |
 | `Permission denied` on `/dev/ttyACM0` | `sudo usermod -aG dialout $USER`, re-login |
-| DepthAI build fails | Ensure `cmake`, `git`, and enough disk in `target/dai-build/` |
-| OpenCV link errors | `sudo apt install libopencv-dev`, set `OPENCV_LINK_LIBS` if needed |
+| DepthAI build fails | Ensure `cmake`, `git`, enough disk in `target/dai-build/` |
+| Old `opencv` build errors | `git pull` — vision no longer uses `opencv-rust` |
 | No gamepad | Autopilot runs without LB e-stop; connect Xbox-compatible pad |

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ab_glyph = "0.2"
 anyhow.workspace = true
 autopilot-config.workspace = true
-opencv.workspace = true
+image.workspace = true
+imageproc = "0.25"
