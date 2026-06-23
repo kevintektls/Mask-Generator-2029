@@ -55,13 +55,23 @@ sudo usermod -aG dialout "$USER"
 
 ## Build
 
+On Jetson, use the helper script (installs correct env + cleans bad depthai checkout):
+
 ```bash
 cd autopilot
-bash scripts/check_build_env.sh   # optional pre-flight
+bash scripts/install_jetson_deps.sh   # once
+bash scripts/build_jetson.sh
+```
+
+Or manually:
+
+```bash
+unset DEPTHAI_CORE_ROOT   # must NOT point to target/dai-build/v3.6.1 (parent folder)
+rm -rf target/dai-build   # if a previous depthai-core clone failed
 cargo build --release -p autopilot
 ```
 
-`opencv` is **not** used — vision runs in pure Rust (`image` + `imageproc`), which avoids fragile `opencv-rust` binding generation on Jetson.
+`depthai-sys` clones and compiles **DepthAI-Core v3.6.1** on first build (30–60+ min on Nano, needs ~4 GB swap recommended). Vision uses pure Rust (`image`/`imageproc`) — no `opencv-rust`.
 
 First build can take **30–60+ minutes** on Jetson Nano while `depthai-sys` compiles DepthAI-Core. Subsequent builds reuse `target/dai-build/`.
 
@@ -117,7 +127,9 @@ The Python script uses `depthai==2.29.0`. This Rust project uses **DepthAI-Core 
 
 | Issue | Fix |
 |---|---|
-| `libudev` / `libudev-sys` build error | `sudo apt install libudev-dev` or `bash scripts/install_jetson_deps.sh` |
+| `CMakeLists.txt` not found in `target/dai-build/v3.6.1` | `unset DEPTHAI_CORE_ROOT`, `rm -rf target/dai-build`, run `bash scripts/build_jetson.sh` |
+| depthai-core build OOM on Nano | Add 4G swap; `export CMAKE_BUILD_PARALLEL_LEVEL=2` |
+| `libudev` / `libudev-sys` build error | `bash scripts/install_jetson_deps.sh` |
 | `Permission denied` on `/dev/ttyACM0` | `sudo usermod -aG dialout $USER`, re-login |
 | DepthAI build fails | Ensure `cmake`, `git`, enough disk in `target/dai-build/` |
 | Old `opencv` build errors | `git pull` — vision no longer uses `opencv-rust` |
