@@ -82,7 +82,10 @@ python3 tools/verify_model.py
 
 | Issue | Fix |
 |---|---|
+| `depthai-sys` / `CMakeLists.txt` not found in `target/dai-build` | `bash scripts/fix_jetson_depthai_build.sh` (or `git pull`, `unset DEPTHAI_CORE_ROOT`, `rm -rf target/dai-build`, `cargo clean`) |
+| Build still mentions `depthai-sys` | Code not updated; `git pull origin dev`, then `cargo clean` |
 | `connecting to camera bridge` failed | Start `python3 tools/camera_bridge.py` first |
+| `depthai not installed` | `pip install depthai==2.29.0` |
 | `libudev` build error | `sudo apt install libudev-dev` |
 | VESC permission denied | `sudo usermod -aG dialout $USER`, re-login |
 | No gamepad e-stop | Connect Xbox pad; autopilot runs without it |

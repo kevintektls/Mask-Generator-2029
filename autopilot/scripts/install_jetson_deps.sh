@@ -11,5 +11,9 @@ sudo apt-get install -y \
   libudev-dev \
   fonts-dejavu-core
 
-echo "[autopilot] Done. Build with:"
+echo "[autopilot] Python camera bridge (install if missing):"
+echo "  pip3 install --user depthai==2.29.0 opencv-python numpy"
+echo "[autopilot] Build with:"
 echo "  bash scripts/build_jetson.sh"
+echo "[autopilot] If you hit depthai-sys / CMake errors from an old checkout:"
+echo "  bash scripts/fix_jetson_depthai_build.sh"
