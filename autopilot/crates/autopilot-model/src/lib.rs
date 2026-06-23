@@ -56,7 +56,8 @@ impl BehavioralCloningCnn {
         let x = x.flatten_from(1)?;
         let x = self.fc1.forward(&x)?.relu()?;
         let x = self.fc2.forward(&x)?.relu()?;
-        Ok(self.fc3.forward(&x)?)
+        // Match Python `return x.squeeze(1)` in model_def.py.
+        Ok(self.fc3.forward(&x)?.squeeze(1)?)
     }
 
     /// Predict servo position from a flat normalized mask buffer (`MASK_H * MASK_W`).
