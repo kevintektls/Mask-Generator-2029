@@ -8,6 +8,12 @@ Once connected through ssh, you can remove screen, mouse and keyboard (we need a
 Plug in camera (OAK-D Lite) and run the 'camera_website.py' script found in camera_scripts/ (python3 camera_scripts/camera_website.py <target fps>)
 Connect from your laptop/computer to <jetson-ip>:8080
 
+[Autopilot Rust]
+Rust port of scripts/Autopilot_IA++.py — see autopilot/README.md for full build instructions.
+  cd autopilot && cargo build --release -p autopilot
+  ./target/release/autopilot --model ../model/pilot_model.pth
+Live mask stream: http://<jetson-ip>:8080 — LB on gamepad = emergency brake.
+
 [VNC]
 Run in jetson nano terminal: 'x11vnc -display :0 -forever -nopw -listen 0.0.0.0 -rfbport 5900'
 Open any VNC Viewer on your laptop/computer

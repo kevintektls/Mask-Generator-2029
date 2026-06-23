@@ -1,0 +1,11 @@
+[package]
+name = "autopilot-camera"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+autopilot-config.workspace = true
+depthai.workspace = true
+opencv.workspace = true
+tracing.workspace = true

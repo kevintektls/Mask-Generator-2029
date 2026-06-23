@@ -1,0 +1,12 @@
+[package]
+name = "autopilot-vesc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+autopilot-config.workspace = true
+serialport.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+vesc.workspace = true

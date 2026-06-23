@@ -1,0 +1,9 @@
+[package]
+name = "autopilot-vision"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+autopilot-config.workspace = true
+opencv.workspace = true

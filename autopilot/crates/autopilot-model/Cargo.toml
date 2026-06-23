@@ -1,0 +1,17 @@
+[package]
+name = "autopilot-model"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "autopilot-verify"
+path = "src/bin/autopilot-verify.rs"
+
+[dependencies]
+anyhow.workspace = true
+autopilot-config.workspace = true
+candle-core.workspace = true
+candle-nn.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
