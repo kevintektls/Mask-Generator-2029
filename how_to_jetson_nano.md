@@ -9,6 +9,8 @@ Plug in camera (OAK-D Lite) and run the 'camera_website.py' script found in came
 Connect from your laptop/computer to <jetson-ip>:8080
 
 [Autopilot Rust]
+Install build deps first (once):
+  cd autopilot && bash scripts/install_jetson_deps.sh
 Rust port of scripts/Autopilot_IA++.py — see autopilot/README.md for full build instructions.
   cd autopilot && cargo build --release -p autopilot
   ./target/release/autopilot --model ../model/pilot_model.pth
