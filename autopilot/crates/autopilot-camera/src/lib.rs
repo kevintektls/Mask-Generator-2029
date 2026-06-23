@@ -65,12 +65,21 @@ impl MonoCamera {
                     self.rx_buf.drain(..idx);
                     continue;
                 }
-                self.rx_buf.clear();
-                bail!("lost sync with camera bridge stream");
+                // Partial header or garbage — wait for more bytes instead of aborting.
+                if self.rx_buf.len() > 1 << 20 {
+                    tracing::warn!("camera bridge: clearing oversized desync buffer");
+                    self.rx_buf.clear();
+                }
+                return Ok(None);
             }
 
             let w = u32::from_le_bytes(self.rx_buf[4..8].try_into().unwrap());
             let h = u32::from_le_bytes(self.rx_buf[8..12].try_into().unwrap());
+            if w != MONO_W || h != MONO_H {
+                tracing::warn!("camera bridge: unexpected frame size {w}x{h}, resyncing");
+                self.rx_buf.drain(..4);
+                continue;
+            }
             let payload = (w as usize)
                 .checked_mul(h as usize)
                 .context("invalid frame dimensions")?;

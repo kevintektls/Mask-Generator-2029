@@ -10,7 +10,7 @@ Protocol per frame:
 
 Usage (Jetson, from autopilot/):
   python3 tools/camera_bridge.py
-  python3 tools/camera_bridge.py --fps 60 --port 9000
+  python3 tools/camera_bridge.py --fps 60 --port 9000 --stats
 
 Start this BEFORE ./target/release/autopilot
 """
@@ -33,8 +33,7 @@ except ImportError:
 MAGIC = b"OAK1"
 MONO_W, MONO_H = 640, 480
 FRAME_BYTES = MONO_W * MONO_H
-HEADER = struct.Struct("<4sII")  # magic, w, h
-HEADER_BYTES = HEADER.size
+HEADER = struct.Struct("<4sII")
 
 
 def build_pipeline(fps: int) -> dai.Pipeline:
@@ -47,7 +46,7 @@ def build_pipeline(fps: int) -> dai.Pipeline:
     xout = pipeline.create(dai.node.XLinkOut)
     xout.setStreamName("left")
     xout.input.setBlocking(False)
-    xout.input.setQueueSize(1)
+    xout.input.setQueueSize(2)
     cam.out.link(xout.input)
     return pipeline
 
@@ -64,38 +63,31 @@ def latest_packet(q: dai.DataOutputQueue) -> dai.ImgFrame | None:
 
 
 def frame_payload(pkt: dai.ImgFrame) -> bytes | None:
-    """Raw GRAY8 bytes — avoids OpenCV conversion in getCvFrame()."""
+    """GRAY8 payload bytes for a 640x480 mono frame."""
     data = pkt.getData()
-    if data is None:
-        return None
-    # numpy ndarray (H, W) or flat
-    n = int(data.size)
-    if n != FRAME_BYTES:
-        return None
-    return data.tobytes()
+    if data is not None and int(data.size) == FRAME_BYTES:
+        return data.tobytes()
+
+    # Fallback — some depthai builds expose only OpenCV frames.
+    frame = pkt.getCvFrame()
+    if frame is not None and frame.ndim == 2 and int(frame.size) == FRAME_BYTES:
+        return frame.tobytes()
+    return None
 
 
-def send_frame_nonblocking(conn: socket.socket, payload: bytes, out_buf: bytearray) -> bool:
-    """
-    Send one frame; return False if the TCP buffer is full (drop frame, never block).
-    """
-    out_buf.clear()
-    out_buf += HEADER.pack(MAGIC, MONO_W, MONO_H)
-    out_buf += payload
-    view = memoryview(out_buf)
-    total = len(view)
-    sent = 0
-    while sent < total:
+def flush_pending(conn: socket.socket, pending: bytearray) -> None:
+    """Send all of `pending`; never return with a partial frame on the wire."""
+    while pending:
         try:
-            n = conn.send(view[sent:])
+            n = conn.send(pending)
         except BlockingIOError:
-            return False
+            time.sleep(0.0002)
+            continue
         except InterruptedError:
             continue
         if n == 0:
-            return False
-        sent += n
-    return True
+            raise ConnectionError("camera bridge: peer closed during send")
+        del pending[:n]
 
 
 def main() -> None:
@@ -113,25 +105,40 @@ def main() -> None:
     print(f"[camera_bridge] waiting for autopilot on {args.host}:{args.port} ...")
     conn, addr = server.accept()
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-    conn.setblocking(False)
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2 << 20)
     print(f"[camera_bridge] autopilot connected from {addr}")
 
     pipeline = build_pipeline(args.fps)
-    out_buf = bytearray(HEADER_BYTES + FRAME_BYTES)
+    pending = bytearray()
 
     sent_frames = 0
-    dropped_tcp = 0
     dropped_cam = 0
     t0 = time.monotonic()
 
     with dai.Device(pipeline) as device:
-        q = device.getOutputQueue(name="left", maxSize=1, blocking=False)
+        q = device.getOutputQueue(name="left", maxSize=2, blocking=False)
         print(f"[camera_bridge] OAK-D CAM_B streaming {MONO_W}x{MONO_H} @ {args.fps} fps target")
         while True:
+            # Finish the current TCP frame before starting another (avoids stream corruption).
+            if pending:
+                flush_pending(conn, pending)
+                sent_frames += 1
+                if args.stats:
+                    now = time.monotonic()
+                    if now - t0 >= 1.0:
+                        fps = sent_frames / (now - t0)
+                        print(
+                            f"[camera_bridge] tx {fps:.1f} fps "
+                            f"(bad_cam={dropped_cam})"
+                        )
+                        sent_frames = 0
+                        dropped_cam = 0
+                        t0 = now
+                continue
+
             pkt = latest_packet(q)
             if pkt is None:
-                time.sleep(0.0005)
+                time.sleep(0.001)
                 continue
 
             payload = frame_payload(pkt)
@@ -139,29 +146,14 @@ def main() -> None:
                 dropped_cam += 1
                 continue
 
-            if not send_frame_nonblocking(conn, payload, out_buf):
-                dropped_tcp += 1
-                continue
-
-            sent_frames += 1
-            if args.stats:
-                now = time.monotonic()
-                if now - t0 >= 1.0:
-                    fps = sent_frames / (now - t0)
-                    print(
-                        f"[camera_bridge] tx {fps:.1f} fps "
-                        f"(dropped tcp={dropped_tcp} cam={dropped_cam})"
-                    )
-                    sent_frames = 0
-                    dropped_tcp = 0
-                    dropped_cam = 0
-                    t0 = now
+            pending.extend(HEADER.pack(MAGIC, MONO_W, MONO_H))
+            pending.extend(payload)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (BrokenPipeError, ConnectionResetError, OSError) as e:
+    except (BrokenPipeError, ConnectionResetError, ConnectionError, OSError) as e:
         if isinstance(e, OSError) and e.errno not in (
             errno.EPIPE,
             errno.ECONNRESET,
