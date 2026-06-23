@@ -17,7 +17,6 @@ check() {
 
 check "pkg-config" pkg-config --version
 check "libudev (pkg-config)" pkg-config --exists libudev
-check "cmake" cmake --version
 check "git" git --version
 check "rustc" rustc --version
 check "cargo" cargo --version

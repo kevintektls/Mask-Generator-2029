@@ -9,6 +9,12 @@ pub const DISPLAY_H: u32 = 480;
 pub const CAM_FPS: u32 = 60;
 pub const STREAM_PORT: u16 = 8080;
 
+// ── Camera bridge (Python depthai 2.x) ───────────────────────────────────────
+pub const MONO_W: u32 = 640;
+pub const MONO_H: u32 = 480;
+pub const CAMERA_BRIDGE_ADDR: &str = "127.0.0.1:9000";
+pub const CAMERA_BRIDGE_MAGIC: &[u8; 4] = b"OAK1";
+
 // ── Vision ───────────────────────────────────────────────────────────────────
 pub const CROP_TOP_RATIO: f64 = 0.20;
 pub const ULTRA_BINARY_THRESH: u8 = 220;
@@ -61,9 +67,13 @@ pub struct Cli {
     #[arg(long, default_value_t = STREAM_PORT)]
     pub stream_port: u16,
 
-    /// Camera FPS target.
+    /// Camera FPS target (used by `tools/camera_bridge.py`).
     #[arg(long, default_value_t = CAM_FPS)]
     pub cam_fps: u32,
+
+    /// TCP address of `tools/camera_bridge.py`.
+    #[arg(long, default_value = CAMERA_BRIDGE_ADDR)]
+    pub camera_addr: String,
 }
 
 #[cfg(test)]

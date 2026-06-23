@@ -9,12 +9,12 @@ Plug in camera (OAK-D Lite) and run the 'camera_website.py' script found in came
 Connect from your laptop/computer to <jetson-ip>:8080
 
 [Autopilot Rust]
-Install build deps first (once):
-  cd autopilot && bash scripts/install_jetson_deps.sh
-Rust port of scripts/Autopilot_IA++.py — see autopilot/README.md for full build instructions.
-  cd autopilot && cargo build --release -p autopilot
-  ./target/release/autopilot --model ../model/pilot_model.pth
-Live mask stream: http://<jetson-ip>:8080 — LB on gamepad = emergency brake.
+Install build deps: cd autopilot && bash scripts/install_jetson_deps.sh
+Build: cd autopilot && cargo build --release -p autopilot
+Run (2 terminals):
+  python3 autopilot/tools/camera_bridge.py --fps 60
+  ./autopilot/target/release/autopilot --model model/pilot_model.pth
+Stream: http://<jetson-ip>:8080 — LB = emergency brake.
 
 [VNC]
 Run in jetson nano terminal: 'x11vnc -display :0 -forever -nopw -listen 0.0.0.0 -rfbport 5900'

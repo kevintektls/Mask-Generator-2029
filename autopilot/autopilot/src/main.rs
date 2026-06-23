@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         cli.stream_port
     );
 
-    let camera = MonoCamera::open(cli.cam_fps)?;
+    let mut camera = MonoCamera::connect(&cli.camera_addr)?;
 
     vesc.servo_center()?;
     vesc.set_duty(0.0)?;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         &model,
         &mut vesc,
         gamepad.as_ref(),
-        &camera,
+        &mut camera,
         &frame_buffer,
         &run_flag,
     );
@@ -79,7 +79,7 @@ fn run_loop(
     model: &autopilot_model::BehavioralCloningCnn,
     vesc: &mut VescClient,
     gamepad: Option<&GamepadMonitor>,
-    camera: &MonoCamera,
+    camera: &mut MonoCamera,
     frame_buffer: &FrameBuffer,
     run_flag: &AtomicBool,
 ) -> Result<()> {
