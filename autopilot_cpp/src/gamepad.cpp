@@ -94,7 +94,7 @@ std::optional<GamepadMonitor> GamepadMonitor::try_start() {
     }
 
     std::cout << "[gamepad] connected for emergency stop (LB)\n";
-    return GamepadMonitor();
+    return std::optional<GamepadMonitor>(std::in_place);
 }
 
 }  // namespace autopilot
