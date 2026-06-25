@@ -17,14 +17,22 @@ namespace {
 
 std::atomic<bool> g_run{true};
 
-void on_sigint(int) {
+void on_shutdown_signal(int) {
     std::cout << "[autopilot] interrupt received — stopping\n";
+    std::cout.flush();
     g_run.store(false);
+}
+
+void install_shutdown_handlers() {
+    std::signal(SIGINT, on_shutdown_signal);
+    std::signal(SIGTERM, on_shutdown_signal);
 }
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    install_shutdown_handlers();
+
     try {
         const autopilot::Cli cli = autopilot::parse_cli(argc, argv);
 
@@ -42,14 +50,14 @@ int main(int argc, char* argv[]) {
         std::cout << "[autopilot] video stream http://localhost:" << cli.stream_port
                   << " (or Jetson IP)\n";
 
-        autopilot::MonoCamera camera = autopilot::MonoCamera::connect(cli.camera_addr);
+        autopilot::MonoCamera camera = autopilot::MonoCamera::connect(
+            cli.camera_addr, [] { return g_run.load(); });
         std::cout << "[autopilot] camera bridge connected at " << cli.camera_addr << '\n';
 
         vesc.servo_center();
         vesc.set_duty(0.0f);
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        std::signal(SIGINT, on_sigint);
         std::cout << "[autopilot] operational — LB = emergency brake\n";
 
         while (g_run.load()) {
@@ -60,14 +68,13 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            auto gray = camera.try_get_gray();
-            if (!gray) {
+            auto mask = camera.try_get_mask();
+            if (!mask) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;
             }
 
-            const cv::Mat mask = autopilot::detect_lines(*gray);
-            const std::vector<float> input = autopilot::mask_to_input(mask);
+            const std::vector<float> input = autopilot::mask_to_input(*mask);
             float servo_pos = model.predict_flat(input);
             servo_pos = std::clamp(servo_pos, 0.0f, 1.0f);
             const float current_duty = autopilot::adaptive_duty(servo_pos);
@@ -75,7 +82,7 @@ int main(int argc, char* argv[]) {
             vesc.set_servo(servo_pos);
             vesc.set_duty(current_duty);
 
-            const cv::Mat display = autopilot::build_display_frame(mask, servo_pos, current_duty);
+            const cv::Mat display = autopilot::build_display_frame(*mask, servo_pos, current_duty);
             stream.publish_frame(autopilot::encode_jpeg(display));
         }
 

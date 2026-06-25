@@ -13,17 +13,15 @@ constexpr int DISPLAY_H = 480;
 constexpr int CAM_FPS = 60;
 constexpr uint16_t STREAM_PORT = 8080;
 
-// Camera bridge (Python depthai 2.x)
-constexpr int MONO_W = 640;
-constexpr int MONO_H = 480;
+// Camera bridge (Python depthai 2.x → vision_preprocess masks)
+constexpr int MASK_W = 160;
+constexpr int MASK_H = 120;
 constexpr const char* CAMERA_BRIDGE_ADDR = "127.0.0.1:9000";
-constexpr char CAMERA_BRIDGE_MAGIC[4] = {'O', 'A', 'K', '1'};
+constexpr char CAMERA_BRIDGE_MAGIC[4] = {'M', 'A', 'S', 'K'};
 
 // Vision
 constexpr double CROP_TOP_RATIO = 0.20;
 constexpr uint8_t ULTRA_BINARY_THRESH = 220;
-constexpr int MASK_W = 160;
-constexpr int MASK_H = 120;
 
 // VESC
 constexpr const char* VESC_PORT = "/dev/ttyACM0";

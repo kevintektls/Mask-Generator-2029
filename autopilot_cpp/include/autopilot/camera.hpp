@@ -1,6 +1,7 @@
 #pragma once
 
 #include <opencv2/core.hpp>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,9 +10,13 @@ namespace autopilot {
 
 class MonoCamera {
 public:
-    static MonoCamera connect(const std::string& addr);
+    using ShouldContinue = std::function<bool()>;
 
-    std::optional<cv::Mat> try_get_gray();
+    static MonoCamera connect(
+        const std::string& addr,
+        ShouldContinue should_continue = [] { return true; });
+
+    std::optional<cv::Mat> try_get_mask();
 
 private:
     explicit MonoCamera(int fd);

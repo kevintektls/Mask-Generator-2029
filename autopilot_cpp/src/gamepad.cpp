@@ -69,6 +69,7 @@ GamepadMonitor::~GamepadMonitor() {
 }
 
 std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "[gamepad] SDL init failed: " << SDL_GetError() << '\n';
         return nullptr;
