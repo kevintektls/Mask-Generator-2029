@@ -2,7 +2,6 @@
 
 #include "autopilot/config.hpp"
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT 0
 #include "httplib.h"
 
 #include <atomic>

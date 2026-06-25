@@ -56,6 +56,4 @@ target_link_libraries(autopilot_cpp PRIVATE
     pthread
 )
 
-target_compile_definitions(autopilot_cpp PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=0)
-
 install(TARGETS autopilot_cpp RUNTIME DESTINATION bin)
