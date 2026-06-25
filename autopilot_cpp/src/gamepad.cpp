@@ -94,7 +94,7 @@ std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
     }
 
     std::cout << "[gamepad] connected for emergency stop (LB)\n";
-    return std::make_unique<GamepadMonitor>();
+    return std::unique_ptr<GamepadMonitor>(new GamepadMonitor());
 }
 
 }  // namespace autopilot
