@@ -1,15 +1,14 @@
 #pragma once
 
-#include <atomic>
 #include <memory>
-#include <optional>
+#include <atomic>
 #include <thread>
 
 namespace autopilot {
 
 class GamepadMonitor {
 public:
-    static std::optional<GamepadMonitor> try_start();
+    static std::unique_ptr<GamepadMonitor> try_start();
 
     bool is_emergency() const { return emergency_.load(std::memory_order_seq_cst); }
 

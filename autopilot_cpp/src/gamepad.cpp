@@ -68,16 +68,16 @@ GamepadMonitor::~GamepadMonitor() {
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
 }
 
-std::optional<GamepadMonitor> GamepadMonitor::try_start() {
+std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
         std::cerr << "[gamepad] SDL init failed: " << SDL_GetError() << '\n';
-        return std::nullopt;
+        return nullptr;
     }
 
     if (SDL_NumJoysticks() <= 0) {
         std::cout << "[gamepad] no gamepad detected — emergency LB disabled\n";
         SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-        return std::nullopt;
+        return nullptr;
     }
 
     bool has_controller = false;
@@ -90,11 +90,11 @@ std::optional<GamepadMonitor> GamepadMonitor::try_start() {
     if (!has_controller) {
         std::cout << "[gamepad] no compatible gamepad — emergency LB disabled\n";
         SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-        return std::nullopt;
+        return nullptr;
     }
 
     std::cout << "[gamepad] connected for emergency stop (LB)\n";
-    return std::optional<GamepadMonitor>(std::in_place);
+    return std::make_unique<GamepadMonitor>();
 }
 
 }  // namespace autopilot
