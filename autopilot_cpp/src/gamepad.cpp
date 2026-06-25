@@ -1,8 +1,12 @@
 #include "autopilot/gamepad.hpp"
 
+#include "autopilot/config.hpp"
+
 #include <SDL2/SDL.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -11,7 +15,30 @@ namespace autopilot {
 
 namespace {
 
-constexpr int POLL_INTERVAL_MS = 20;
+constexpr int POLL_INTERVAL_MS = 50;
+
+float apply_deadzone(float value) {
+    if (std::fabs(value) < GAMEPAD_DEADZONE) {
+        return 0.0f;
+    }
+    const float sign = value > 0.0f ? 1.0f : -1.0f;
+    return sign * (std::fabs(value) - GAMEPAD_DEADZONE) / (1.0f - GAMEPAD_DEADZONE);
+}
+
+float triggers_to_duty(float forward_raw, float backward_raw) {
+    float throttle = std::clamp(forward_raw - backward_raw, -1.0f, 1.0f);
+    throttle = apply_deadzone(throttle);
+    return std::clamp(throttle * MANUAL_MAX_DUTY, -MANUAL_MAX_DUTY, MANUAL_MAX_DUTY);
+}
+
+float axis_to_servo(float axis_value) {
+    const float v = apply_deadzone(axis_value);
+    return std::clamp(SERVO_CENTER + v * MANUAL_SERVO_RANGE, 0.0f, 1.0f);
+}
+
+float normalize_axis(Sint16 raw) {
+    return static_cast<float>(raw) / 32767.0f;
+}
 
 struct ControllerState {
     std::vector<SDL_GameController*> controllers;
@@ -39,19 +66,34 @@ GamepadMonitor::GamepadMonitor() {
     }
 
     thread_ = std::thread([this, state]() {
+        SDL_GameController* primary =
+            state->controllers.empty() ? nullptr : state->controllers.front();
+        bool lb_prev = false;
+
         while (running_.load()) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
-                if (event.type == SDL_CONTROLLERBUTTONDOWN &&
-                    event.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
-                    emergency_.store(true, std::memory_order_seq_cst);
-                }
             }
 
-            for (SDL_GameController* ctrl : state->controllers) {
-                if (SDL_GameControllerGetButton(ctrl, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) {
-                    emergency_.store(true, std::memory_order_seq_cst);
+            if (primary != nullptr) {
+                const bool lb_now =
+                    SDL_GameControllerGetButton(primary, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) != 0;
+                if (lb_now && !lb_prev) {
+                    const bool manual = !manual_mode_.load(std::memory_order_seq_cst);
+                    manual_mode_.store(manual, std::memory_order_seq_cst);
+                    std::cout << "[gamepad] mode: " << (manual ? "manual" : "autonomous") << '\n';
                 }
+                lb_prev = lb_now;
+
+                const float forward =
+                    normalize_axis(SDL_GameControllerGetAxis(primary, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+                const float backward =
+                    normalize_axis(SDL_GameControllerGetAxis(primary, SDL_CONTROLLER_AXIS_TRIGGERLEFT));
+                const float steering =
+                    normalize_axis(SDL_GameControllerGetAxis(primary, SDL_CONTROLLER_AXIS_LEFTX));
+
+                manual_duty_.store(triggers_to_duty(forward, backward), std::memory_order_seq_cst);
+                manual_servo_.store(axis_to_servo(steering), std::memory_order_seq_cst);
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
@@ -76,7 +118,7 @@ std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
     }
 
     if (SDL_NumJoysticks() <= 0) {
-        std::cout << "[gamepad] no gamepad detected — emergency LB disabled\n";
+        std::cout << "[gamepad] no gamepad detected — manual mode disabled\n";
         SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
         return nullptr;
     }
@@ -89,12 +131,12 @@ std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
         }
     }
     if (!has_controller) {
-        std::cout << "[gamepad] no compatible gamepad — emergency LB disabled\n";
+        std::cout << "[gamepad] no compatible gamepad — manual mode disabled\n";
         SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
         return nullptr;
     }
 
-    std::cout << "[gamepad] connected for emergency stop (LB)\n";
+    std::cout << "[gamepad] connected — LB toggles manual/autonomous\n";
     return std::unique_ptr<GamepadMonitor>(new GamepadMonitor());
 }
 

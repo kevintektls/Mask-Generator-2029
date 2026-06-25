@@ -1,7 +1,9 @@
 #pragma once
 
-#include <memory>
+#include "autopilot/config.hpp"
+
 #include <atomic>
+#include <memory>
 #include <thread>
 
 namespace autopilot {
@@ -10,7 +12,9 @@ class GamepadMonitor {
 public:
     static std::unique_ptr<GamepadMonitor> try_start();
 
-    bool is_emergency() const { return emergency_.load(std::memory_order_seq_cst); }
+    bool manual_mode() const { return manual_mode_.load(std::memory_order_seq_cst); }
+    float manual_duty() const { return manual_duty_.load(std::memory_order_seq_cst); }
+    float manual_servo() const { return manual_servo_.load(std::memory_order_seq_cst); }
 
     GamepadMonitor(const GamepadMonitor&) = delete;
     GamepadMonitor& operator=(const GamepadMonitor&) = delete;
@@ -19,7 +23,9 @@ public:
 private:
     GamepadMonitor();
 
-    std::atomic<bool> emergency_{false};
+    std::atomic<bool> manual_mode_{false};
+    std::atomic<float> manual_duty_{0.0f};
+    std::atomic<float> manual_servo_{SERVO_CENTER};
     std::atomic<bool> running_{true};
     std::thread thread_;
 };

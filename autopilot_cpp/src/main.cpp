@@ -58,14 +58,24 @@ int main(int argc, char* argv[]) {
         vesc.set_duty(0.0f);
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        std::cout << "[autopilot] operational — LB = emergency brake\n";
+        std::cout << "[autopilot] operational — LB toggles manual/autonomous\n";
 
         while (g_run.load()) {
-            if (gamepad && gamepad->is_emergency()) {
-                std::cout << "[autopilot] EMERGENCY: LB pressed — applying motor brake\n";
-                vesc.set_brake(autopilot::EMERGENCY_BRAKE_A);
-                vesc.servo_center();
-                break;
+            if (gamepad && gamepad->manual_mode()) {
+                const float servo_pos = gamepad->manual_servo();
+                const float current_duty = gamepad->manual_duty();
+                vesc.set_servo(servo_pos);
+                vesc.set_duty(current_duty);
+
+                auto mask = camera.try_get_mask();
+                if (mask) {
+                    const cv::Mat display =
+                        autopilot::build_display_frame(*mask, servo_pos, current_duty);
+                    stream.publish_frame(autopilot::encode_jpeg(display));
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                continue;
             }
 
             auto mask = camera.try_get_mask();

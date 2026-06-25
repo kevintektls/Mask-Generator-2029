@@ -40,6 +40,11 @@ constexpr float STEER_THRESHOLD = 0.08f;
 constexpr float EMERGENCY_BRAKE_A = 15.0f;
 constexpr float SHUTDOWN_BRAKE_A = 10.0f;
 
+// Manual driving (Xbox / F710 — matches scripts/controller.py)
+constexpr float MANUAL_MAX_DUTY = 0.15f;
+constexpr float MANUAL_SERVO_RANGE = 0.5f;
+constexpr float GAMEPAD_DEADZONE = 0.08f;
+
 constexpr const char* DEFAULT_MODEL_PATH = "../model/pilot_model.onnx";
 
 inline float adaptive_duty(float servo_pos) {
