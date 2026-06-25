@@ -17,7 +17,23 @@ sudo apt-get install -y \
   libsdl2-dev \
   libjpeg-dev \
   fonts-dejavu-core \
-  curl
+  curl \
+  python3-pip
+
+# Ubuntu 18.04 (Jetson) ships cmake 3.10; autopilot_cpp requires >= 3.16.
+cmake_ver() {
+  cmake --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || true
+}
+CMAKE_VER="$(cmake_ver)"
+CMAKE_MAJOR="${CMAKE_VER%%.*}"
+CMAKE_MINOR="$(echo "${CMAKE_VER}" | cut -d. -f2)"
+if [[ -z "${CMAKE_VER}" ]] || [[ "${CMAKE_MAJOR}" -lt 3 ]] || [[ "${CMAKE_MAJOR}" -eq 3 && "${CMAKE_MINOR}" -lt 16 ]]; then
+  echo "[autopilot_cpp] Upgrading cmake (found ${CMAKE_VER:-none}, need >= 3.16)..."
+  sudo pip3 install --upgrade cmake
+  hash -r 2>/dev/null || true
+  CMAKE_VER="$(cmake_ver)"
+  echo "[autopilot_cpp] cmake now: ${CMAKE_VER}"
+fi
 
 if [[ ! -f "${ORT_DIR}/lib/libonnxruntime.so" ]]; then
   echo "[autopilot_cpp] Downloading ONNX Runtime ${ORT_VERSION} (aarch64)..."
