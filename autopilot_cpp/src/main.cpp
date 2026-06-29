@@ -58,12 +58,14 @@ int main(int argc, char* argv[]) {
         vesc.set_duty(0.0f);
         std::this_thread::sleep_for(std::chrono::seconds(1));
 
-        std::cout << "[autopilot] operational — LB toggles manual/autonomous\n";
+        std::cout << "[autopilot] operational — LB toggles manual/autonomous, D-pad up/down adjusts speed\n";
 
         while (g_run.load()) {
             if (gamepad && gamepad->manual_mode()) {
                 const float servo_pos = gamepad->manual_servo();
-                const float current_duty = gamepad->manual_duty();
+                const float current_duty = std::clamp(
+                    gamepad->manual_duty() + gamepad->duty_offset(),
+                    -MANUAL_MAX_DUTY, MANUAL_MAX_DUTY);
                 vesc.set_servo(servo_pos);
                 vesc.set_duty(current_duty);
 
@@ -87,7 +89,9 @@ int main(int argc, char* argv[]) {
             const std::vector<float> input = autopilot::mask_to_input(*mask);
             float servo_pos = model.predict_flat(input);
             servo_pos = std::clamp(servo_pos, 0.0f, 1.0f);
-            const float current_duty = autopilot::adaptive_duty(servo_pos);
+            const float duty_bias = gamepad ? gamepad->duty_offset() : 0.0f;
+            const float current_duty = std::clamp(
+                autopilot::adaptive_duty(servo_pos) + duty_bias, 0.0f, DUTY_MAX + DUTY_OFFSET_MAX);
 
             vesc.set_servo(servo_pos);
             vesc.set_duty(current_duty);

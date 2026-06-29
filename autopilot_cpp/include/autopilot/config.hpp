@@ -44,6 +44,9 @@ constexpr float SHUTDOWN_BRAKE_A = 10.0f;
 constexpr float MANUAL_MAX_DUTY = 0.15f;
 constexpr float MANUAL_SERVO_RANGE = 0.5f;
 constexpr float GAMEPAD_DEADZONE = 0.08f;
+constexpr float DUTY_DPAD_STEP = 0.005f;
+constexpr float DUTY_OFFSET_MIN = -0.03f;
+constexpr float DUTY_OFFSET_MAX = 0.03f;
 
 constexpr const char* DEFAULT_MODEL_PATH = "../model/pilot_model.onnx";
 

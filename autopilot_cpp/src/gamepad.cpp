@@ -69,6 +69,8 @@ GamepadMonitor::GamepadMonitor() {
         SDL_GameController* primary =
             state->controllers.empty() ? nullptr : state->controllers.front();
         bool lb_prev = false;
+        bool dpad_up_prev = false;
+        bool dpad_down_prev = false;
 
         while (running_.load()) {
             SDL_Event event;
@@ -84,6 +86,27 @@ GamepadMonitor::GamepadMonitor() {
                     std::cout << "[gamepad] mode: " << (manual ? "manual" : "autonomous") << '\n';
                 }
                 lb_prev = lb_now;
+
+                const bool dpad_up =
+                    SDL_GameControllerGetButton(primary, SDL_CONTROLLER_BUTTON_DPAD_UP) != 0;
+                const bool dpad_down =
+                    SDL_GameControllerGetButton(primary, SDL_CONTROLLER_BUTTON_DPAD_DOWN) != 0;
+                if (dpad_up && !dpad_up_prev) {
+                    const float offset = std::clamp(
+                        duty_offset_.load(std::memory_order_seq_cst) + DUTY_DPAD_STEP,
+                        DUTY_OFFSET_MIN, DUTY_OFFSET_MAX);
+                    duty_offset_.store(offset, std::memory_order_seq_cst);
+                    std::cout << "[gamepad] speed offset: " << offset << '\n';
+                }
+                if (dpad_down && !dpad_down_prev) {
+                    const float offset = std::clamp(
+                        duty_offset_.load(std::memory_order_seq_cst) - DUTY_DPAD_STEP,
+                        DUTY_OFFSET_MIN, DUTY_OFFSET_MAX);
+                    duty_offset_.store(offset, std::memory_order_seq_cst);
+                    std::cout << "[gamepad] speed offset: " << offset << '\n';
+                }
+                dpad_up_prev = dpad_up;
+                dpad_down_prev = dpad_down;
 
                 const float forward =
                     normalize_axis(SDL_GameControllerGetAxis(primary, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
@@ -136,7 +159,7 @@ std::unique_ptr<GamepadMonitor> GamepadMonitor::try_start() {
         return nullptr;
     }
 
-    std::cout << "[gamepad] connected — LB toggles manual/autonomous\n";
+    std::cout << "[gamepad] connected — LB toggles manual/autonomous, D-pad up/down adjusts speed\n";
     return std::unique_ptr<GamepadMonitor>(new GamepadMonitor());
 }
 
