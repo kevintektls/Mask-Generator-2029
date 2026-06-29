@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
                 const float servo_pos = gamepad->manual_servo();
                 const float current_duty = std::clamp(
                     gamepad->manual_duty() + gamepad->duty_offset(),
-                    -MANUAL_MAX_DUTY, MANUAL_MAX_DUTY);
+                    -autopilot::MANUAL_MAX_DUTY, autopilot::MANUAL_MAX_DUTY);
                 vesc.set_servo(servo_pos);
                 vesc.set_duty(current_duty);
 
@@ -91,7 +91,8 @@ int main(int argc, char* argv[]) {
             servo_pos = std::clamp(servo_pos, 0.0f, 1.0f);
             const float duty_bias = gamepad ? gamepad->duty_offset() : 0.0f;
             const float current_duty = std::clamp(
-                autopilot::adaptive_duty(servo_pos) + duty_bias, 0.0f, DUTY_MAX + DUTY_OFFSET_MAX);
+                autopilot::adaptive_duty(servo_pos) + duty_bias, 0.0f,
+                autopilot::DUTY_MAX + autopilot::DUTY_OFFSET_MAX);
 
             vesc.set_servo(servo_pos);
             vesc.set_duty(current_duty);
