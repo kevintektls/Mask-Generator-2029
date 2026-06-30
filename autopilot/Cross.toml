@@ -1,0 +1,13 @@
+# Cross-compilation to Jetson (aarch64-unknown-linux-gnu) via https://github.com/cross-rs/cross
+#
+# Usage (Mac):
+#   cargo install cross --git https://github.com/cross-rs/cross
+#   cross build --target aarch64-unknown-linux-gnu --release -p autopilot
+#
+# Or: bash scripts/build_jetson_cross.sh
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update",
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y libudev-dev pkg-config",
+]

@@ -1,0 +1,1 @@
+python3.8 ../autopilot/tools/camera_bridge.py --fps 60 &  ./build/autopilot_cpp --model ../model/pilot_model.onnx

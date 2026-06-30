@@ -1,0 +1,13 @@
+[package]
+name = "autopilot-stream"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+autopilot-config.workspace = true
+axum.workspace = true
+futures-util = "0.3"
+image.workspace = true
+tokio.workspace = true
+tracing.workspace = true
