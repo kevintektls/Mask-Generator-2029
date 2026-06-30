@@ -196,17 +196,22 @@ def main():
                 q_right = device_dai.getOutputQueue(name="right", maxSize=2, blocking=False)
 
                 while True:
-                    # 🚨 FREINAGE ET ARRÊT D'URGENCE MANETTE (LB)
+                    # 🚨 1. FREINAGE ET ARRÊT D'URGENCE MANETTE (LB)
                     if gamepad and gamepad.isConnected() and gamepad.isPressed("LB"):
                         print("\n[🚨 URGENCE] LB enfoncé ! Injection du frein électrique !")
                         vesc.set_brake(15.0)
                         vesc.set_servo(SERVO_CENTER)
                         break
 
+                    # 📥 2. RÉCUPÉRATION DES PACKETS MATÉRIELS (C'est cette partie qui te manquait !)
+                    pkt_left = q_left.get()
+                    pkt_right = q_right.get()
+
+                    # 🖼️ 3. EXTRACTION DES IMAGES OPENCV
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()
 
-                    # Utilisation stricte de tes fichiers externes importés
+                    # 🛠️ 4. TRAITEMENT DE TON MASQUE ET DE TA DEQUE...
                     mask = make_mask_stereo(raw_left, raw_right)
                     mask_resized = resize_for_model(mask)
 
