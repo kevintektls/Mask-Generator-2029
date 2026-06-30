@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import torch
 import depthai as dai
+from collections import deque
 from pyvesc import VESC
 
 sys.path.insert(0, "/home/robotcar/Gamepad")
@@ -190,6 +191,7 @@ def main():
 
         try:
             with dai.Device(pipeline) as device_dai:
+                img_history = deque(maxlen=3)
                 q_left = device_dai.getOutputQueue(name="left", maxSize=2, blocking=False)
                 q_right = device_dai.getOutputQueue(name="right", maxSize=2, blocking=False)
 
@@ -201,13 +203,6 @@ def main():
                         vesc.set_servo(SERVO_CENTER)
                         break
 
-                    pkt_left = q_left.tryGet()
-                    pkt_right = q_right.tryGet()
-
-                    if pkt_left is None or pkt_right is None:
-                        time.sleep(0.002)
-                        continue
-
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()
 
@@ -215,11 +210,24 @@ def main():
                     mask = make_mask_stereo(raw_left, raw_right)
                     mask_resized = resize_for_model(mask)
 
+                    # Remplissage de l'historique temporel
+                    if len(img_history) == 0:
+                        # Au tout début, on duplique la première frame 3 fois pour remplir le buffer
+                        img_history.append(mask_resized)
+                        img_history.append(mask_resized)
+                        img_history.append(mask_resized)
+                    else:
+                        # Mode normal : on ajoute la nouvelle et la plus ancienne dégage automatiquement
+                        img_history.append(mask_resized)
+
+                    # On empile les 3 images (t-2, t-1, t) pour créer l'équivalent de 3 canaux
+                    stacked_frames = np.stack(list(img_history), axis=0)
+
+                    # Création du tenseur avec la bonne dimension : [Batch=1, Canaux=3, H=120, W=160]
                     img_tensor = (
-                        torch.from_numpy(mask_resized)
+                        torch.from_numpy(stacked_frames)
                         .float()
-                        .unsqueeze(0)
-                        .unsqueeze(0)
+                        .unsqueeze(0)  # Ajoute la dimension de Batch
                         / 255.0
                     ).to(device)
 
