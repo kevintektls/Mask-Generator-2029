@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 # IMPORTANT : garder les mêmes paramètres partout
-CROP_TOP_RATIO = 0.45
+CROP_TOP_RATIO = 0.35
 
 # Alignement manuel caméra droite -> caméra gauche
 STEREO_DX = -15.0
