@@ -356,12 +356,11 @@ def main():
                     prev_a = a_now
 
                     # Récupération synchrone des frames OAK-D
-                    pkt_left = q_left.tryGet()
-                    pkt_right = q_right.tryGet()
-                    
-                    if pkt_left is None or pkt_right is None:
-                        time.sleep(0.002)
-                        continue
+                    pkt_left = q_left.get()
+                    pkt_right = q_right.get()
+
+                    raw_left = pkt_left.getCvFrame()
+                    raw_right = pkt_right.getCvFrame()
 
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()

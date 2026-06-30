@@ -1,15 +1,23 @@
+#!/usr/bin/env python3
+
 import torch
 import torch.nn as nn
+import os
+import sys
+
 from pathlib import Path
 from model_def import BehavioralCloningCNN
 
 
+
 # Importe ton modèle ici (ajuste selon ton projet)
 # from train_model import BehavioralCloningCNN 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_OUT = Path("pilot_model.pth")
 
 def export_to_onnx(model_path, output_path, img_height=120, img_width=160):
     # 1. Recréer et charger le modèle
-    model = BehavioralCloningCNN() # Remplace par ta classe
+    model =  BehavioralCloningCNN().to(DEVICE) # Remplace par ta classe
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
 
