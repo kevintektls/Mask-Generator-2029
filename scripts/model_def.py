@@ -13,7 +13,7 @@ class BehavioralCloningCNN(nn.Module):
         super().__init__()
 
         self.features = nn.Sequential(
-            nn.Conv2d(1, 24, kernel_size=5, stride=2),
+            nn.Conv2d(3, 24, kernel_size=5, stride=2), # Attend maintenant tes 3 canaux (t, t-1, t-2)
             nn.ReLU(),
 
             nn.Conv2d(24, 36, kernel_size=5, stride=2),
