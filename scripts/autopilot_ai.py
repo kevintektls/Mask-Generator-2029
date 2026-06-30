@@ -25,6 +25,7 @@ import Gamepad
 
 from model_def import BehavioralCloningCNN
 from vision_preprocess import make_mask_stereo, resize_for_model, CROP_TOP_RATIO
+from collections import deque
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ def main():
         time.sleep(1.0)
 
         try:
+            frame_buffer = deque(maxlen=3)
             with dai.Device(pipeline) as device_dai:
                 q_left = device_dai.getOutputQueue(name="left", maxSize=2, blocking=False)
                 q_right = device_dai.getOutputQueue(name="right", maxSize=2, blocking=False)
@@ -157,7 +159,7 @@ def main():
                         print("[URGENCE] LB pressé. Coupure immédiate.")
                         emergency_stop(vesc)
                         break
-
+                
                     pkt_left = q_left.tryGet()
                     pkt_right = q_right.tryGet()
 
@@ -168,15 +170,24 @@ def main():
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()
 
-                    # Même masque que le dataset
                     mask = make_mask_stereo(raw_left, raw_right)
                     mask_resized = resize_for_model(mask)
 
+                    # ── AJOUT : Gestion de la file d'attente temporelle en direct ──
+                    if len(frame_buffer) == 0:
+                        for _ in range(3):
+                            frame_buffer.append(mask_resized.copy())
+                    else:
+                        frame_buffer.append(mask_resized.copy())
+
+                    # On convertit le buffer (3 masques) en un array numpy de dimension (3, H, W)
+                    stacked_input = np.stack(list(frame_buffer), axis=0)
+
+                    # Transformation pour PyTorch : ajout de la dimension Batch -> (1, 3, H, W)
                     img_tensor = (
-                        torch.from_numpy(mask_resized)
+                        torch.from_numpy(stacked_input)
                         .float()
-                        .unsqueeze(0)
-                        .unsqueeze(0)
+                        .unsqueeze(0) 
                         / 255.0
                     ).to(device)
 

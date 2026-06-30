@@ -17,6 +17,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue, Empty
 from vision_preprocess import make_mask_stereo
+from collections import deque
 
 sys.path.insert(0, '/home/robotcar/Gamepad')
 
@@ -66,6 +67,7 @@ ROI_NEAR_BOT    = 0.85
 LANE_WIDTH_PX    = 340  
 LANE_WIDTH_MIN   = 160
 SMOOTHING_ALPHA  = 0.25  
+frame_buffer = deque(maxlen=3)
 
 # VESC Connection
 VESC_PORT            = '/dev/ttyACM0'
@@ -374,7 +376,13 @@ def main():
 
                     # Appel de notre fonction de traitement stéréo ultra-propre
                     mask = make_mask_stereo(raw_left, raw_right)
-
+                    # ── AJOUT : Gestion de l'historique temporel ────────────────────────────────────
+                    if len(frame_buffer) == 0:
+                        # Au démarrage, on remplit le buffer avec 3 copies du premier masque
+                        for _ in range(3):
+                            frame_buffer.append(mask.copy())
+                    else:
+                        frame_buffer.append(mask.copy())
                     if autonomous_mode:
                         (servo_pos, line_found, target_x, left_x, right_x, _, _) = compute_steering(mask)
                         turn = min(1.0, abs(servo_pos - SERVO_CENTER) / SERVO_RANGE)
@@ -396,14 +404,16 @@ def main():
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    if is_recording and abs(duty) > 0.005:
+                    if is_recording:  # On enregistre TOUT dès que le mode REC est actif pour garder la chronologie
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                         img_name = f"line_{timestamp}.png"
                         img_path = IMAGES_DIR / img_name
                         row = [f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"]
                         try:
+                            # On continue de sauvegarder l'image courante (mask)
+                            # Le Dataset PyTorch se chargera d'empiler cette image avec les deux précédentes !
                             write_queue.put_nowait((img_path, mask.copy(), row))
-                        except:
+                        except Exception:
                             pass
 
                     # ── Rendu Visuel HUD ──────────────────────────────────────

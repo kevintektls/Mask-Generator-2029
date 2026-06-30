@@ -50,26 +50,50 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class RobotCarDataset(Dataset):
     def __init__(self, dataframe: pd.DataFrame, base_dir: Path):
-        self.df = dataframe.reset_index(drop=True)
         self.base_dir = Path(base_dir)
+        
+        # IMPORTANT : Pour l'historique, le dataframe DOIT être trié chronologiquement.
+        # On le trie par le nom du chemin de l'image (qui contient le timestamp).
+        self.df = dataframe.sort_values(by="image_path").reset_index(drop=True)
 
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def _load_and_resize_mask(self, idx: int) -> np.ndarray:
         row = self.df.iloc[idx]
-
         rel_path = str(row["image_path"]).replace("\\", "/")
         img_path = self.base_dir / rel_path
-
+        
         mask = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if mask is None:
             raise FileNotFoundError(f"Impossible de charger l'image : {img_path}")
+            
+        return resize_for_model(mask)
 
-        mask_resized = resize_for_model(mask)
+    def __getitem__(self, idx):
+        # 1. Charger la frame actuelle (t)
+        frame_t = self._load_and_resize_mask(idx)
+        
+        # 2. Charger la frame précédente (t-1) avec sécurité si début du fichier
+        if idx >= 1:
+            frame_tm1 = self._load_and_resize_mask(idx - 1)
+        else:
+            frame_tm1 = frame_t.copy()
+            
+        # 3. Charger la frame (t-2)
+        if idx >= 2:
+            frame_tm2 = self._load_and_resize_mask(idx - 2)
+        else:
+            frame_tm2 = frame_tm1.copy()
 
-        img_tensor = torch.from_numpy(mask_resized).float().unsqueeze(0) / 255.0
-        servo = torch.tensor(float(row["servo"]), dtype=torch.float32)
+        # Empilement sur l'axe des canaux (axis=0) -> Donne une forme (3, H, W)
+        stacked_frames = np.stack([frame_tm2, frame_tm1, frame_t], axis=0)
+
+        # Transformation en tenseur PyTorch et normalisation
+        img_tensor = torch.from_numpy(stacked_frames).float() / 255.0
+        
+        # Cible (Target)
+        servo = torch.tensor(float(self.df.iloc[idx]["servo"]), dtype=torch.float32)
 
         return img_tensor, servo
 
@@ -102,11 +126,11 @@ def main():
     if len(df) < 100:
         print(f"[WARNING] Dataset très petit : {len(df)} images. Le modèle risque d'être nul.")
 
+    # REMPLACE ton train_test_split actuel par ceci :
     train_df, val_df = train_test_split(
         df,
         test_size=0.2,
-        random_state=42,
-        shuffle=True,
+        shuffle=False, # Impératif pour préserver les séquences d'images t-1, t-2 !
     )
 
     print(f"[DATA] Train: {len(train_df)} images | Val: {len(val_df)} images")
