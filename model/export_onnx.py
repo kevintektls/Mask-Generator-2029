@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from pathlib import Path
+from model_def import BehavioralCloningCNN
+
 
 # Importe ton modèle ici (ajuste selon ton projet)
 # from train_model import BehavioralCloningCNN 
