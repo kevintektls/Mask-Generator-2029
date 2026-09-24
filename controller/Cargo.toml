@@ -1,0 +1,10 @@
+[package]
+name = "controller"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+ctrlc = "3"
+gilrs = "0.11"
+autopilot-vesc = { path = "../autopilot/crates/autopilot-vesc" }
