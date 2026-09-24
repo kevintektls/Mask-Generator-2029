@@ -131,7 +131,7 @@ fn drive_loop(
         }
 
         vesc.set_duty(duty)?;
-        vesc.set_servo(axis_to_servo(gamepad.value(Axis::RightStickX)))?;
+        vesc.set_servo(axis_to_servo(gamepad.value(Axis::LeftStickX)))?;
         thread::sleep(POLL_INTERVAL);
     }
 }
