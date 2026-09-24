@@ -39,9 +39,18 @@ fn axis_to_servo(axis_value: f32) -> f32 {
     )
 }
 
-// Xbox-style triggers are reported by gilrs on a -1..1 axis, with -1 at rest.
-fn trigger_value(value: f32) -> f32 {
-    clamp((value + 1.0) * 0.5, 0.0, 1.0)
+// Triggers may be exposed as analog buttons or as axes, depending on the OS mapping.
+fn trigger_value(gamepad: &gilrs::Gamepad, button: Button, axis: Axis) -> f32 {
+    if let Some(data) = gamepad.button_data(button) {
+        return clamp(data.value(), 0.0, 1.0);
+    }
+
+    let value = gamepad.value(axis);
+    if value < 0.0 {
+        clamp((value + 1.0) * 0.5, 0.0, 1.0)
+    } else {
+        clamp(value, 0.0, 1.0)
+    }
 }
 
 fn connected_gamepad(gilrs: &Gilrs) -> Option<GamepadId> {
@@ -114,8 +123,8 @@ fn drive_loop(
             return Ok(());
         }
 
-        let forward = trigger_value(gamepad.value(Axis::RightZ));
-        let backward = trigger_value(gamepad.value(Axis::LeftZ));
+        let forward = trigger_value(&gamepad, Button::RightTrigger2, Axis::RightZ);
+        let backward = trigger_value(&gamepad, Button::LeftTrigger2, Axis::LeftZ);
         let mut duty = triggers_to_duty(forward, backward);
         if gamepad.is_pressed(Button::LeftTrigger) {
             duty *= SLOW_FACTOR;
