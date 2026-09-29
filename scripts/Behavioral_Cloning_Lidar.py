@@ -17,10 +17,12 @@ import csv
 import json
 import math
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     import Gamepad
@@ -62,6 +64,8 @@ LIDAR_PORT = "/dev/ttyTHS1"
 LIDAR_BAUDRATE = 230400
 LIDAR_MAX_RANGE_M = 12.0
 LIDAR_BINS = 180
+PREVIEW_HOST = "0.0.0.0"
+PREVIEW_PORT = 5001
 
 MAX_DUTY_CYCLE = 0.10
 SERVO_CENTER = 0.5
@@ -226,6 +230,50 @@ def open_dataset(path: Path):
     return handle, writer
 
 
+preview_state = {"scan": [], "servo": SERVO_CENTER, "duty": 0.0, "recording": False,
+                 "updated_at": None}
+preview_lock = threading.Lock()
+
+
+class LidarPreviewHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/scan":
+            with preview_lock:
+                payload = json.dumps(preview_state, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if self.path != "/":
+            self.send_error(404)
+            return
+
+        page = """<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>LiDAR preview</title>
+<style>body{margin:0;background:#111820;color:#e8eef2;font:15px system-ui;display:grid;place-items:center;min-height:100vh}
+main{width:min(94vw,760px)}h1{font-size:1.15rem;font-weight:600;margin:0 0 10px}canvas{width:100%;background:#151e27;border:1px solid #34414c;border-radius:12px}
+p{color:#aab7c1;font-variant-numeric:tabular-nums}</style><main><h1>LiDAR D500 · front scan</h1>
+<canvas id="radar" width="760" height="520"></canvas><p id="status">Connecting…</p></main>
+<script>const c=document.querySelector('#radar'),x=c.getContext('2d'),status=document.querySelector('#status');
+function draw(s){const w=c.width,h=c.height,cx=w/2,cy=h-42,R=Math.min(w/2-30,h-80);x.clearRect(0,0,w,h);x.fillStyle='#151e27';x.fillRect(0,0,w,h);
+for(let m=1;m<=6;m++){let r=R*m/6;x.beginPath();x.arc(cx,cy,r,Math.PI,2*Math.PI);x.strokeStyle='#35424d';x.stroke();x.fillStyle='#aab7c1';x.font='13px system-ui';x.fillText(m+'m',cx+8,cy-r-4)}
+for(let a=-90;a<=90;a+=30){let t=a*Math.PI/180;x.beginPath();x.moveTo(cx,cy);x.lineTo(cx+Math.sin(t)*R,cy-Math.cos(t)*R);x.strokeStyle='#26333d';x.stroke()}
+(s.scan||[]).forEach((d,i)=>{if(!(d>0&&d<12))return;let a=(i-90)*Math.PI/180,r=R*Math.min(d,6)/6;x.beginPath();x.arc(cx+Math.sin(a)*r,cy-Math.cos(a)*r,3,0,Math.PI*2);x.fillStyle=d<1?'#ff645e':'#56d891';x.fill()});
+x.fillStyle='#8fbbe0';x.fillRect(cx-1,cy-R,2,R);status.textContent=`${s.recording?'REC':'MANUAL'} · servo ${Number(s.servo).toFixed(2)} · duty ${Number(s.duty).toFixed(3)} · updated ${s.updated_at||'waiting for scan'}`}
+async function poll(){try{const r=await fetch('/scan',{cache:'no-store'});draw(await r.json())}catch(e){status.textContent='Preview connection lost; reconnecting…'}setTimeout(poll,150)}poll();</script></html>""".encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.end_headers()
+        self.wfile.write(page)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lidar-port", default=LIDAR_PORT,
@@ -234,6 +282,12 @@ def parse_args():
                         help=f"CSV de sortie (défaut : {DATASET_CSV})")
     parser.add_argument("--vesc-port", default=VESC_PORT,
                         help=f"Port série VESC (défaut : {VESC_PORT})")
+    parser.add_argument("--preview", action="store_true",
+                        help="Démarre l'aperçu LiDAR accessible dans un navigateur (utile en SSH)")
+    parser.add_argument("--preview-host", default=PREVIEW_HOST,
+                        help=f"Adresse d'écoute de l'aperçu (défaut : {PREVIEW_HOST})")
+    parser.add_argument("--preview-port", type=int, default=PREVIEW_PORT,
+                        help=f"Port HTTP de l'aperçu (défaut : {PREVIEW_PORT})")
     return parser.parse_args()
 
 
@@ -241,6 +295,16 @@ def main() -> int:
     global VESC_PORT
     args = parse_args()
     VESC_PORT = args.vesc_port
+
+    preview_server = None
+    if args.preview:
+        try:
+            preview_server = ThreadingHTTPServer((args.preview_host, args.preview_port), LidarPreviewHandler)
+        except OSError as exc:
+            print(f"[ERROR] Impossible de démarrer le serveur d'aperçu : {exc}")
+            return 1
+        threading.Thread(target=preview_server.serve_forever, daemon=True).start()
+        print(f"[INFO] Aperçu web : http://<adresse-du-robot>:{args.preview_port}/")
 
     if not Gamepad.available():
         print("[INFO] En attente de la manette...")
@@ -272,6 +336,8 @@ def main() -> int:
             print("\n=== COLLECTEUR DATASET LiDAR D500 ===")
             print("RT : avancer | LT : reculer | joystick gauche : direction")
             print("A : démarrer/arrêter l'enregistrement | LB : arrêt immédiat")
+            if args.preview:
+                print(f"Aperçu web : http://<adresse-du-robot>:{args.preview_port}/")
             print(f"CSV : {args.csv} | UART LiDAR : {args.lidar_port} @ {LIDAR_BAUDRATE}")
 
             try:
@@ -299,6 +365,14 @@ def main() -> int:
                     # Les commandes restent stables pendant l'acquisition du tour,
                     # elles décrivent donc bien le scan associé dans le CSV.
                     scan = lidar.read_scan()
+
+                    if args.preview:
+                        with preview_lock:
+                            preview_state.update({
+                                "scan": scan, "servo": servo, "duty": duty,
+                                "recording": recording,
+                                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                            })
 
                     if recording:
                         timestamp = datetime.now().isoformat(timespec="milliseconds")
@@ -335,6 +409,9 @@ def main() -> int:
             lidar.close()
         if dataset_handle is not None:
             dataset_handle.close()
+        if preview_server is not None:
+            preview_server.shutdown()
+            preview_server.server_close()
         gamepad.stopBackgroundUpdates()
         print("\n[INFO] Commandes moteur coupées, ressources fermées.")
     return 0
