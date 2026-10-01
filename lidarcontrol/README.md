@@ -19,6 +19,22 @@ RT fait avancer et LT reculer, le joystick gauche dirige, A démarre ou
 met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête les
 deux processus ; le script de conduite envoie alors duty zéro au VESC.
 
+La caméra affiche CAM_B à gauche et CAM_C à droite en paires synchronisées.
+Le delta effectif apparaît sous l’image ; le seuil est
+`camera_sync_threshold_ms` (5 ms par défaut). Après avoir vérifié plusieurs
+paires, appuyer sur A puis conduire manuellement pour enregistrer un tour de
+scan de l’étage dans `manual_scan_csv` (`lidarcontrol/data/floor_scan.csv`).
+Le fichier CSV est en mode ajout ; renommer ou effacer l’ancien fichier avant
+une nouvelle cartographie. Appuyer sur LB termine l’enregistrement et arrête
+le contrôleur.
+
+Construire ensuite la carte depuis ce relevé :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- map \
+  --input lidarcontrol/data/floor_scan.csv --output lidarcontrol/maps/floor
+```
+
 Le lanceur utilise les ports de `config.toml` (LiDAR `/dev/ttyTHS1`, VESC
 `/dev/ttyACM0`, caméra limitée à 24 FPS). Il vérifie les imports du contrôleur avant de
 démarrer les capteurs. Si `pyvesc` ou `pyserial` manque :
@@ -72,10 +88,12 @@ faire bouger la voiture.
 
 ## Étape 3 : capture OAK-D Lite et synchronisation temporelle
 
-Le pont utilise les mêmes API DepthAI v2.29 que les scripts du dépôt : caméra
-mono `CAM_B`, `THE_480_P`, et `getCvFrame()`. Il envoie des JPEG avec leur
-timestamp Unix en nanosecondes. Le receiver Rust enregistre les images dans
-`lidarcontrol/data/camera/frames/` et les indexe dans `frames.jsonl`.
+Le pont utilise DepthAI v2.29 et les mêmes sockets/résolutions que les scripts
+stéréo du dépôt : `CAM_B` gauche et `CAM_C` droite, `THE_480_P`, même FPS. Un
+Sync node associe les frames par timestamp avec un seuil de 5 ms. Les paires
+hors seuil ne sont pas affichées ni transmises. La preview montre la paire
+côte-à-côte et son delta mesuré. Le receiver Rust enregistre cette image
+composite JPEG à 1280×480 avec le timestamp hôte de réception.
 
 Terminal 1 sur la Jetson — démarre la caméra et son endpoint d’image local :
 
@@ -89,7 +107,8 @@ Terminal 2 — uniquement si l’on veut aussi enregistrer les frames caméra :
 cargo run --release --manifest-path lidarcontrol/Cargo.toml -- camera-record
 ```
 
-Le pont expose la dernière image sur `http://<jetson-ip>:9011/frame.jpg` sans
+Le pont expose le flux MJPEG de la dernière paire sur
+`http://<jetson-ip>:9011/stream.mjpg` sans
 exiger le receiver Rust. Le receiver Rust reste optionnel pour enregistrer les
 frames. Pour avoir LiDAR + caméra sur une seule page et le pilotage manette,
 lancer dans un autre terminal sur la Jetson :

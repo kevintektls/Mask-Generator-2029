@@ -2,11 +2,13 @@
 lidar_port = "/dev/ttyTHS1"
 lidar_baud = 230400
 scan_log = "lidarcontrol/data/scan.jsonl"
+manual_scan_csv = "lidarcontrol/data/floor_scan.csv"
 map_resolution_m = 0.05
 camera_bridge_addr = "127.0.0.1:9010"
 camera_output = "lidarcontrol/data/camera"
 camera_fps = 24
 camera_startup_timeout_s = 60
+camera_sync_threshold_ms = 5.0
 vesc_port = "/dev/ttyACM0"
 camera_sync_tolerance_ms = 80
 localization_min_confidence = 0.30

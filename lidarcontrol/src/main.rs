@@ -149,11 +149,13 @@ struct Config {
     lidar_port: String,
     lidar_baud: u32,
     scan_log: PathBuf,
+    manual_scan_csv: PathBuf,
     map_resolution_m: f32,
     camera_bridge_addr: String,
     camera_output: PathBuf,
     camera_fps: u32,
     camera_startup_timeout_s: u64,
+    camera_sync_threshold_ms: f32,
     vesc_port: String,
     camera_sync_tolerance_ms: u64,
     localization_min_confidence: f32,
@@ -173,11 +175,13 @@ impl Default for Config {
             lidar_port: "/dev/ttyTHS1".into(),
             lidar_baud: 230_400,
             scan_log: "lidarcontrol/data/scan.jsonl".into(),
+            manual_scan_csv: "lidarcontrol/data/floor_scan.csv".into(),
             map_resolution_m: 0.05,
             camera_bridge_addr: "127.0.0.1:9010".into(),
             camera_output: "lidarcontrol/data/camera".into(),
             camera_fps: 24,
             camera_startup_timeout_s: 60,
+            camera_sync_threshold_ms: 5.0,
             vesc_port: "/dev/ttyACM0".into(),
             camera_sync_tolerance_ms: 80,
             localization_min_confidence: 0.30,
@@ -356,6 +360,11 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     if !(10..=300).contains(&config.camera_startup_timeout_s) {
         anyhow::bail!("camera_startup_timeout_s must be in [10, 300]");
     }
+    if !config.camera_sync_threshold_ms.is_finite()
+        || !(0.5..=20.0).contains(&config.camera_sync_threshold_ms)
+    {
+        anyhow::bail!("camera_sync_threshold_ms must be in [0.5, 20]");
+    }
     let stopping = Arc::new(AtomicBool::new(false));
     {
         let stopping = Arc::clone(&stopping);
@@ -377,6 +386,8 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         .arg(&bridge_script)
         .arg("--fps")
         .arg(config.camera_fps.to_string())
+        .arg("--sync-threshold-ms")
+        .arg(config.camera_sync_threshold_ms.to_string())
         .current_dir(&repo_root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -424,6 +435,8 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     let mut controller = match ProcessCommand::new(PYTHON_EXECUTABLE)
         .arg(&controller_script)
         .arg("--preview")
+        .arg("--csv")
+        .arg(&config.manual_scan_csv)
         .arg("--lidar-port")
         .arg(&config.lidar_port)
         .arg("--vesc-port")
