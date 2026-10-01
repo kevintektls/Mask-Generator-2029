@@ -18,6 +18,8 @@ avant de lancer le contrôleur LiDAR. La manette doit être branchée à la Jets
 RT fait avancer et LT reculer, le joystick gauche dirige, A démarre ou
 met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête les
 deux processus ; le script de conduite envoie alors duty zéro au VESC.
+Les panneaux LiDAR et caméra se redimensionnent depuis leur coin inférieur
+droit. Chaque caméra dispose de son propre bouton plein écran.
 
 ### Brancher le récepteur Logitech F710 au Mac et conduire par SSH
 

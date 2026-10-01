@@ -24,6 +24,9 @@ SYNC_THRESHOLD_MS = 5.0
 MIDDLE_CAMERA_ENABLED = False
 latest_frame = {
     "jpeg": None,
+    "left_jpeg": None,
+    "middle_jpeg": None,
+    "right_jpeg": None,
     "timestamp_unix_ns": 0,
     "sequence": 0,
     "left_right_delta_ms": None,
@@ -73,7 +76,13 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(jpeg)
             return
-        if path == "/stream.mjpg":
+        stream_name = {
+            "/stream.mjpg": "jpeg",
+            "/left.mjpg": "left_jpeg",
+            "/middle.mjpg": "middle_jpeg",
+            "/right.mjpg": "right_jpeg",
+        }.get(path)
+        if stream_name is not None:
             self.send_response(200)
             self.send_header(
                 "Content-Type", "multipart/x-mixed-replace; boundary=frame"
@@ -86,11 +95,11 @@ class PreviewHandler(BaseHTTPRequestHandler):
                 while True:
                     with frame_condition:
                         frame_condition.wait_for(
-                            lambda: latest_frame["jpeg"] is not None
+                            lambda: latest_frame[stream_name] is not None
                             and latest_frame["sequence"] != sequence,
                             timeout=5,
                         )
-                        jpeg = latest_frame["jpeg"]
+                        jpeg = latest_frame[stream_name]
                         current_sequence = latest_frame["sequence"]
                     if jpeg is None:
                         continue
@@ -262,7 +271,10 @@ def main() -> None:
 
             left_frame = left_packet.getCvFrame()
             right_frame = right_packet.getCvFrame()
+            left_bgr = as_bgr(left_frame)
+            right_bgr = as_bgr(right_frame)
             middle_delta_ms = None
+            middle_preview = None
             if middle_queue is not None:
                 next_middle = middle_queue.tryGet()
                 while next_middle is not None:
@@ -271,6 +283,7 @@ def main() -> None:
                     next_middle = middle_queue.tryGet()
                 if middle_frame is None or middle_timestamp is None:
                     continue
+                middle_preview = as_bgr(middle_frame)
                 middle_delta_ms = (
                     middle_timestamp - left_timestamp
                 ).total_seconds() * 1000.0
@@ -278,13 +291,13 @@ def main() -> None:
                 frame_width = left_frame.shape[1]
                 stereo_frame = cv2.hconcat(
                     (
-                        as_bgr(left_frame),
-                        fit_frame(middle_frame, frame_width, frame_height),
-                        as_bgr(right_frame),
+                        left_bgr,
+                        fit_frame(middle_preview, frame_width, frame_height),
+                        right_bgr,
                     )
                 )
             else:
-                stereo_frame = cv2.hconcat((left_frame, right_frame))
+                stereo_frame = cv2.hconcat((left_bgr, right_bgr))
             timestamp_unix_ns = time.time_ns()
             ok, encoded = cv2.imencode(
                 ".jpg", stereo_frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality]
@@ -293,8 +306,22 @@ def main() -> None:
                 continue
             height, width = stereo_frame.shape[:2]
             payload = encoded.tobytes()
+            camera_payloads = {}
+            for name, frame in (("left_jpeg", left_bgr), ("right_jpeg", right_bgr)):
+                ok, camera_encoded = cv2.imencode(
+                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality]
+                )
+                if ok:
+                    camera_payloads[name] = camera_encoded.tobytes()
+            if middle_preview is not None:
+                ok, camera_encoded = cv2.imencode(
+                    ".jpg", middle_preview, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality]
+                )
+                if ok:
+                    camera_payloads["middle_jpeg"] = camera_encoded.tobytes()
             with frame_condition:
                 latest_frame["jpeg"] = payload
+                latest_frame.update(camera_payloads)
                 latest_frame["timestamp_unix_ns"] = timestamp_unix_ns
                 latest_frame["sequence"] = latest_frame.get("sequence", 0) + 1
                 latest_frame["left_right_delta_ms"] = delta_ms
