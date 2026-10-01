@@ -85,13 +85,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9010)
-    parser.add_argument("--fps", type=int, default=15)
+    parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--preview-host", default="0.0.0.0")
     parser.add_argument("--preview-port", type=int, default=9011)
     args = parser.parse_args()
-    if not 1 <= args.fps <= 60:
-        parser.error("--fps must be in [1, 60]")
+    if not 1 <= args.fps <= 24:
+        parser.error("--fps must be in [1, 24]")
     if not 30 <= args.jpeg_quality <= 100:
         parser.error("--jpeg-quality must be in [30, 100]")
 

@@ -176,7 +176,7 @@ impl Default for Config {
             map_resolution_m: 0.05,
             camera_bridge_addr: "127.0.0.1:9010".into(),
             camera_output: "lidarcontrol/data/camera".into(),
-            camera_fps: 15,
+            camera_fps: 24,
             camera_startup_timeout_s: 60,
             vesc_port: "/dev/ttyACM0".into(),
             camera_sync_tolerance_ms: 80,
@@ -350,8 +350,8 @@ fn point_arg(values: &[f32], name: &str) -> Result<Waypoint> {
 }
 
 fn start_preview_and_controller(config: &Config) -> Result<()> {
-    if !(1..=60).contains(&config.camera_fps) {
-        anyhow::bail!("camera_fps must be in [1, 60]");
+    if !(1..=24).contains(&config.camera_fps) {
+        anyhow::bail!("camera_fps must be in [1, 24]");
     }
     if !(10..=300).contains(&config.camera_startup_timeout_s) {
         anyhow::bail!("camera_startup_timeout_s must be in [10, 300]");
