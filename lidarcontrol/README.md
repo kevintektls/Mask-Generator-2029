@@ -22,7 +22,7 @@ deux processus ; le script de conduite envoie alors duty zéro au VESC.
 Le lanceur utilise les ports de `config.toml` (LiDAR `/dev/ttyTHS1`, VESC
 `/dev/ttyACM0`, caméra 15 FPS). Il vérifie les imports du contrôleur avant de
 démarrer les capteurs. Si `pyvesc` ou `pyserial` manque :
-`python3 -m pip install --user -r requirements.txt`. Le module Gamepad doit être
+`python3.8 -m pip install --user -r requirements.txt`. Le module Gamepad doit être
 installé à l’emplacement déjà utilisé par les scripts existants. Il n’exécute
 pas de navigation autonome.
 
@@ -80,7 +80,7 @@ timestamp Unix en nanosecondes. Le receiver Rust enregistre les images dans
 Terminal 1 sur la Jetson — démarre la caméra et son endpoint d’image local :
 
 ```bash
-python3 lidarcontrol/tools/oak_bridge.py --fps 15
+python3.8 lidarcontrol/tools/oak_bridge.py --fps 15
 ```
 
 Terminal 2 — uniquement si l’on veut aussi enregistrer les frames caméra :
@@ -95,7 +95,7 @@ frames. Pour avoir LiDAR + caméra sur une seule page et le pilotage manette,
 lancer dans un autre terminal sur la Jetson :
 
 ```bash
-python3 scripts/Behavioral_Cloning_Lidar.py --preview
+python3.8 scripts/Behavioral_Cloning_Lidar.py --preview
 ```
 
 Puis ouvrir `http://<jetson-ip>:5001/`. La page montre les deux capteurs ; la

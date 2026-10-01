@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+const PYTHON_EXECUTABLE: &str = "python3.8";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "lidarcontrol",
@@ -371,7 +373,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     }
     check_manual_controller_dependencies(&controller_script, &repo_root)?;
 
-    let mut camera = ProcessCommand::new("python3")
+    let mut camera = ProcessCommand::new(PYTHON_EXECUTABLE)
         .arg(&bridge_script)
         .arg("--fps")
         .arg(config.camera_fps.to_string())
@@ -380,7 +382,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
-        .context("starting OAK-D camera bridge with python3")?;
+        .context("starting OAK-D camera bridge with python3.8")?;
     info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
 
     info!(
@@ -419,7 +421,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         anyhow::bail!("OAK-D produced no preview frame within {} seconds; LiDAR/VESC controller was not started", config.camera_startup_timeout_s);
     }
 
-    let mut controller = match ProcessCommand::new("python3")
+    let mut controller = match ProcessCommand::new(PYTHON_EXECUTABLE)
         .arg(&controller_script)
         .arg("--preview")
         .arg("--lidar-port")
@@ -431,7 +433,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
-        .context("starting existing LiDAR/gamepad/VESC controller with python3")
+        .context("starting existing LiDAR/gamepad/VESC controller with python3.8")
     {
         Ok(child) => child,
         Err(error) => {
@@ -494,7 +496,7 @@ fn camera_frame_ready() -> bool {
 }
 
 fn check_manual_controller_dependencies(script: &PathBuf, repo_root: &PathBuf) -> Result<()> {
-    let output = ProcessCommand::new("python3")
+    let output = ProcessCommand::new(PYTHON_EXECUTABLE)
         .arg(script)
         .arg("--help")
         .current_dir(repo_root)
@@ -503,7 +505,7 @@ fn check_manual_controller_dependencies(script: &PathBuf, repo_root: &PathBuf) -
     if !output.status.success() {
         eprint!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
-        anyhow::bail!("manual control dependencies are missing. Install them for this Python with: python3 -m pip install --user -r requirements.txt");
+        anyhow::bail!("manual control dependencies are missing. Install them for Python 3.8 with: python3.8 -m pip install --user -r requirements.txt");
     }
     Ok(())
 }
