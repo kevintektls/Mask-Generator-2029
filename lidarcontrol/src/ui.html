@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="fr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>lidarcontrol — planification</title>
+<style>
+body{font:15px system-ui;background:#10161d;color:#e8eef5;margin:24px}main{max-width:1000px;margin:auto}canvas{display:block;max-width:100%;height:auto;border:1px solid #526171;background:#222;margin:16px 0;image-rendering:pixelated;cursor:crosshair}button{padding:9px 14px;margin-right:8px}#status{color:#a8c7e8}.legend{color:#b8c4d0}
+</style><main><h1>Navigation — planification hors ligne</h1>
+<p>Cliquez pour définir le départ, puis l’arrivée. Carte LiDAR : libre en clair, bloqué/inconnu en sombre.</p>
+<canvas id="map"></canvas><button id="plan">Calculer A*</button><button id="reset">Effacer</button>
+<p id="status">Chargement…</p><p class="legend">Interface de planification uniquement : aucun ordre moteur n’est envoyé.</p>
+<script>
+const canvas=document.querySelector('#map'),ctx=canvas.getContext('2d'),status=document.querySelector('#status');let data=null,start=null,goal=null,path=[];
+function draw(){if(!data)return;canvas.width=data.width;canvas.height=data.height;const im=ctx.createImageData(data.width,data.height);for(let i=0;i<data.cells.length;i++){const v=data.cells[i]?218:42;im.data.set([v,v+(!data.cells[i]?4:0),v+(!data.cells[i]?8:0),255],i*4)}ctx.putImageData(im,0,0);ctx.fillStyle='#35d07f';ctx.strokeStyle='#35d07f';ctx.lineWidth=Math.max(1,data.width/500);if(path.length){ctx.beginPath();path.forEach((p,i)=>{const [x,y]=pixel(p);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke()}for(const [p,c] of [[start,'#39e783'],[goal,'#ff725e']])if(p){const [x,y]=pixel(p);ctx.fillStyle=c;ctx.beginPath();ctx.arc(x,y,Math.max(2,data.width/100),0,Math.PI*2);ctx.fill()}}
+function pixel(p){return [(p.x_m-data.origin_x_m)/data.resolution_m,data.height-1-(p.y_m-data.origin_y_m)/data.resolution_m]}
+fetch('/api/map').then(r=>r.json()).then(d=>{data=d;draw();status.textContent=`Carte ${d.width}×${d.height}, résolution ${d.resolution_m} m. Cliquez le départ.`}).catch(e=>status.textContent='Erreur carte : '+e);
+canvas.addEventListener('click',e=>{if(!data)return;const r=canvas.getBoundingClientRect(),cx=(e.clientX-r.left)*canvas.width/r.width,cy=(e.clientY-r.top)*canvas.height/r.height,p={x_m:data.origin_x_m+(cx+.5)*data.resolution_m,y_m:data.origin_y_m+(data.height-cy-.5)*data.resolution_m};if(!start){start=p;status.textContent='Départ choisi. Cliquez l’arrivée.'}else{goal=p;status.textContent='Arrivée choisie. Calcul A* disponible.'}path=[];draw()});
+document.querySelector('#plan').onclick=async()=>{if(!start||!goal){status.textContent='Choisissez départ et arrivée.';return}status.textContent='Calcul du chemin…';try{const r=await fetch('/api/plan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({start,goal})}),d=await r.json();if(!r.ok)throw Error(d.error);path=d.path;draw();status.textContent=`Chemin calculé : ${path.length} points.`}catch(e){status.textContent='Planification impossible : '+e.message}};
+document.querySelector('#reset').onclick=()=>{start=goal=null;path=[];draw();status.textContent='Cliquez le départ.'};
+</script></main></html>

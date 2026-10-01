@@ -1,4 +1,4 @@
-# lidarcontrol — étape 1 : acquisition et replay LiDAR
+# lidarcontrol — acquisition, mapping LiDAR et capture caméra
 
 Programme Rust autonome pour le LDROBOT D500 / STL-19P. Le framing UART, le
 CRC-8, l’interpolation des 12 points et la convention angulaire reprennent le
@@ -47,6 +47,70 @@ scan courant du collecteur Python ; il n’affiche pas encore la carte Rust ni l
 caméra. Le collecteur attend également la manette et se connecte au contrôleur
 moteur, donc ne le lance pas comme simple viewer sur une voiture prête à rouler.
 
+## Étape 3 : capture OAK-D Lite et synchronisation temporelle
+
+Le pont utilise les mêmes API DepthAI v2.29 que les scripts du dépôt : caméra
+mono `CAM_B`, `THE_480_P`, et `getCvFrame()`. Il envoie des JPEG avec leur
+timestamp Unix en nanosecondes. Le receiver Rust enregistre les images dans
+`lidarcontrol/data/camera/frames/` et les indexe dans `frames.jsonl`.
+
+Terminal 1 sur la Jetson :
+
+```bash
+python3 lidarcontrol/tools/oak_bridge.py --fps 15
+```
+
+Terminal 2 :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- camera-record
+```
+
+Après connexion du programme Rust, la preview mono est disponible à
+`http://<jetson-ip>:9011/`. Elle affiche seulement la caméra. Pour enregistrer
+en parallèle les scans LiDAR, lancer aussi `lidarcontrol record` dans un autre
+terminal ; le pilotage manuel peut rester dans le contrôleur existant.
+
+Après avoir produit la carte et le journal de poses, associer chaque pose au
+frame caméra le plus proche :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- sync \
+  --poses lidarcontrol/maps/floor.poses.jsonl \
+  --frames lidarcontrol/data/camera/frames.jsonl
+```
+
+La tolérance par défaut est de 80 ms (`camera_sync_tolerance_ms` dans
+`config.toml`) ; chaque paire indique l’écart de temps signé. Les deux temps
+utilisent l’horloge Unix de la Jetson. Le timestamp caméra est pris à la
+réception de la frame par DepthAI côté hôte, pas à l’exposition du capteur ;
+celui du LiDAR est estimé au paquet contenant le bin avant central. C’est une
+synchronisation d’arrivée approximative, à mesurer et valider sur les logs.
+Les extrinsèques LiDAR-caméra ne sont pas encore appliquées ; l’assemblage
+spatial, la fermeture de boucle visuelle et la fusion obstacle restent à faire.
+
+## Étape 4 : localisation sur la carte enregistrée
+
+La commande `localize` recharge le PGM/YAML et fait un appariement scan-vers-
+carte autour de la dernière pose (ou d’une pose initiale fournie en mètres et
+degrés) :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- localize \
+  --map lidarcontrol/maps/floor.yaml \
+  --input lidarcontrol/data/scan.jsonl \
+  --initial-x 0 --initial-y 0 --initial-yaw-deg 0
+```
+
+La sortie JSONL contient `x_m`, `y_m`, `yaw_rad`, confiance, erreur moyenne et
+un indicateur `stop`. Sous le seuil `localization_min_confidence` (défaut 0.30),
+la pose retenue est conservée et le traitement marque `STOP`. Cette commande
+traite des enregistrements : elle n’envoie pas encore d’arrêt au Flipsky. La
+relocalisation globale si le point de départ est inconnu, la fusion des images
+et le contrôleur d’arrêt en temps réel restent à intégrer. Le CSV historique
+peut servir à la carte/localisation, mais pas à l’association temporelle avec
+la caméra, car son timestamp local ne contient pas de fuseau horaire.
+
 ## Enregistrer sur la voiture
 
 Les valeurs par défaut sont dans `lidarcontrol/config.toml` : UART
@@ -74,6 +138,60 @@ UART ; ils ne constituent pas encore une synchronisation avec la caméra.
    le replay. Faire pivoter lentement la voiture à la main et recommencer pour
    vérifier que les bins gauche/droite suivent la convention du script Python.
 
-Cette étape n’envoie aucune commande au Flipsky/VESC. La cartographie SLAM,
-l’odométrie, la fusion caméra-LiDAR et le contrôle autonome ne sont pas encore
-implémentés.
+Cette étape n’envoie aucune commande au Flipsky/VESC.
+
+## Étape 5 : planification, interface et replay de suivi
+
+Planifier une route A* sur les cellules connues libres. Les cellules inconnues
+et occupées sont bloquées, et la marge d’obstacle est configurable :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- plan \
+  --map lidarcontrol/maps/floor.yaml --start 1.0 1.0 --goal 3.0 2.0 --margin 0.25
+```
+
+L’interface web locale propose de cliquer le départ et l’arrivée, puis affiche
+la route calculée :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- ui \
+  --map lidarcontrol/maps/floor.yaml --bind 127.0.0.1:8765
+```
+
+Ouvrir `http://127.0.0.1:8765`. Elle ne commande aucun moteur. Le départ doit
+être cliqué car aucune pose courante temps réel n’est publiée à l’interface.
+
+Le replay de navigation relocalise les scans enregistrés, calcule la poursuite
+Pure Pursuit et journalise les commandes simulées. Il arrête le replay si la
+localisation tombe sous le seuil, si un scan est absent plus de 500 ms, ou si
+un obstacle apparaît dans le secteur avant sous `obstacle_stop_distance_m` :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- simulate \
+  --map lidarcontrol/maps/floor.yaml --input lidarcontrol/data/scan.jsonl \
+  --start 1.0 1.0 --goal 3.0 2.0 --initial-yaw-deg 0
+```
+
+Le suivi simulé exige de renseigner `simulation_wheelbase_m`,
+`simulation_max_steering_rad` et les valeurs de servo gauche/centre/droite dans
+`config.toml`. Elles sont volontairement absentes tant que les mesures de la
+voiture ne sont pas fournies. Cette commande est un replay des commandes, pas
+une simulation dynamique complète du véhicule, et ne pilote pas le VESC.
+
+## Limites et étape matérielle restante
+
+La carte est construite par ICP scan-à-scan sans IMU, encodeurs ni fermeture de
+boucle : la dérive s’accumule, surtout dans les couloirs longs ou les pièces
+symétriques. Le LiDAR plan peut manquer les obstacles au-dessus/en dessous de
+son plan et peut mal voir le verre. La caméra est capturée et appariée par
+horodatage hôte, mais elle n’est pas encore fusionnée dans la carte ou la
+localisation ; ses extrinsèques ne sont pas définies. Il n’y a pas de
+localisation temps réel, de détection caméra d’obstacle, d’évitement local
+actif, d’interface de progression en direct, de bouton d’arrêt moteur ni de
+sortie VESC dans `lidarcontrol`.
+
+Ces fonctions ne peuvent pas être activées sans les mesures de géométrie et de
+servo demandées, la transformation extrinsèque LiDAR-caméra, ainsi que la
+confirmation du comportement électrique d’arrêt attendu pour le Flipsky. Les
+protections de cette version s’appliquent uniquement au replay et au
+planificateur logiciel.

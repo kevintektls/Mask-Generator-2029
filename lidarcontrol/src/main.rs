@@ -1,10 +1,15 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use lidarcontrol::mapping::{build_map, write_pose_log};
+use lidarcontrol::camera::{record_camera_frames, CameraFrameRecord};
+use lidarcontrol::localization::{localize_scans, LocalizationPose, OccupancyMap};
+use lidarcontrol::mapping::{build_map, write_pose_log, PoseRecord};
+use lidarcontrol::navigation::{map_view, plan_path, pure_pursuit, Waypoint};
 use lidarcontrol::{read_scans, ScanRecord};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
+use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,6 +57,82 @@ enum Command {
         #[arg(long)]
         resolution: Option<f32>,
     },
+    /// Record timestamped OAK-D Lite mono frames through the DepthAI bridge.
+    CameraRecord {
+        #[arg(long, default_value = "lidarcontrol/config.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        addr: Option<String>,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Pair each mapped LiDAR pose with its nearest timestamped camera frame.
+    Sync {
+        #[arg(long, default_value = "lidarcontrol/config.toml")]
+        config: PathBuf,
+        #[arg(long)]
+        poses: PathBuf,
+        #[arg(long)]
+        frames: PathBuf,
+        #[arg(long, default_value = "lidarcontrol/data/sensor_pairs.jsonl")]
+        output: PathBuf,
+        #[arg(long)]
+        tolerance_ms: Option<u64>,
+    },
+    /// Localize recorded LiDAR scans against a saved occupancy map.
+    Localize {
+        #[arg(long, default_value = "lidarcontrol/maps/floor.yaml")]
+        map: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, default_value = "lidarcontrol/data/localization.jsonl")]
+        output: PathBuf,
+        #[arg(long, default_value = "lidarcontrol/config.toml")]
+        config: PathBuf,
+        #[arg(long, default_value_t = 0.0)]
+        initial_x: f32,
+        #[arg(long, default_value_t = 0.0)]
+        initial_y: f32,
+        #[arg(long, default_value_t = 0.0)]
+        initial_yaw_deg: f32,
+        #[arg(long)]
+        min_confidence: Option<f32>,
+    },
+    /// Plan a collision-margin A* route through known free map cells.
+    Plan {
+        #[arg(long, default_value = "lidarcontrol/maps/floor.yaml")]
+        map: PathBuf,
+        #[arg(long, num_args = 2)]
+        start: Vec<f32>,
+        #[arg(long, num_args = 2)]
+        goal: Vec<f32>,
+        #[arg(long, default_value_t = 0.25)]
+        margin: f32,
+    },
+    /// Start the local map-click UI. This is planning-only and never drives motors.
+    Ui {
+        #[arg(long, default_value = "lidarcontrol/maps/floor.yaml")]
+        map: PathBuf,
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        bind: String,
+        #[arg(long, default_value_t = 0.25)]
+        margin: f32,
+    },
+    /// Replay localization and evaluate tracking/safety commands offline.
+    Simulate {
+        #[arg(long, default_value = "lidarcontrol/maps/floor.yaml")]
+        map: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long, num_args = 2)]
+        start: Vec<f32>,
+        #[arg(long, num_args = 2)]
+        goal: Vec<f32>,
+        #[arg(long, default_value_t = 0.0)]
+        initial_yaw_deg: f32,
+        #[arg(long, default_value = "lidarcontrol/config.toml")]
+        config: PathBuf,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +142,18 @@ struct Config {
     lidar_baud: u32,
     scan_log: PathBuf,
     map_resolution_m: f32,
+    camera_bridge_addr: String,
+    camera_output: PathBuf,
+    camera_sync_tolerance_ms: u64,
+    localization_min_confidence: f32,
+    safety_margin_m: f32,
+    obstacle_stop_distance_m: f32,
+    simulation_speed_mps: f32,
+    simulation_wheelbase_m: Option<f32>,
+    simulation_max_steering_rad: Option<f32>,
+    simulation_servo_center: Option<f32>,
+    simulation_servo_left: Option<f32>,
+    simulation_servo_right: Option<f32>,
 }
 
 impl Default for Config {
@@ -70,6 +163,18 @@ impl Default for Config {
             lidar_baud: 230_400,
             scan_log: "lidarcontrol/data/scan.jsonl".into(),
             map_resolution_m: 0.05,
+            camera_bridge_addr: "127.0.0.1:9010".into(),
+            camera_output: "lidarcontrol/data/camera".into(),
+            camera_sync_tolerance_ms: 80,
+            localization_min_confidence: 0.30,
+            safety_margin_m: 0.25,
+            obstacle_stop_distance_m: 0.30,
+            simulation_speed_mps: 0.20,
+            simulation_wheelbase_m: None,
+            simulation_max_steering_rad: None,
+            simulation_servo_center: None,
+            simulation_servo_left: None,
+            simulation_servo_right: None,
         }
     }
 }
@@ -115,7 +220,317 @@ fn main() -> Result<()> {
                 resolution.unwrap_or(config.map_resolution_m),
             )
         }
+        Command::CameraRecord {
+            config,
+            addr,
+            output,
+        } => {
+            let config_text = std::fs::read_to_string(&config)
+                .with_context(|| format!("reading config {}", config.display()))?;
+            let config: Config = toml::from_str(&config_text)
+                .with_context(|| format!("parsing config {}", config.display()))?;
+            let addr = addr.unwrap_or(config.camera_bridge_addr);
+            let output = output.unwrap_or(config.camera_output);
+            record_camera_frames(&addr, &output)
+        }
+        Command::Sync {
+            config,
+            poses,
+            frames,
+            output,
+            tolerance_ms,
+        } => {
+            let config_text = std::fs::read_to_string(&config)
+                .with_context(|| format!("reading config {}", config.display()))?;
+            let config: Config = toml::from_str(&config_text)
+                .with_context(|| format!("parsing config {}", config.display()))?;
+            sync_sensor_logs(
+                &poses,
+                &frames,
+                &output,
+                tolerance_ms.unwrap_or(config.camera_sync_tolerance_ms),
+            )
+        }
+        Command::Localize {
+            map,
+            input,
+            output,
+            config,
+            initial_x,
+            initial_y,
+            initial_yaw_deg,
+            min_confidence,
+        } => {
+            let config_text = std::fs::read_to_string(&config)
+                .with_context(|| format!("reading config {}", config.display()))?;
+            let config: Config = toml::from_str(&config_text)
+                .with_context(|| format!("parsing config {}", config.display()))?;
+            localize_log(
+                &map,
+                &input,
+                &output,
+                LocalizationPose {
+                    x_m: initial_x,
+                    y_m: initial_y,
+                    yaw_rad: initial_yaw_deg.to_radians(),
+                },
+                min_confidence.unwrap_or(config.localization_min_confidence),
+            )
+        }
+        Command::Plan {
+            map,
+            start,
+            goal,
+            margin,
+        } => {
+            let occupancy = OccupancyMap::load_yaml(&map)?;
+            let path = plan_path(
+                &occupancy,
+                point_arg(&start, "start")?,
+                point_arg(&goal, "goal")?,
+                margin,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&path)?);
+            Ok(())
+        }
+        Command::Ui { map, bind, margin } => serve_ui(&map, &bind, margin),
+        Command::Simulate {
+            map,
+            input,
+            start,
+            goal,
+            initial_yaw_deg,
+            config,
+        } => {
+            let cfg: Config = toml::from_str(
+                &fs::read_to_string(&config)
+                    .with_context(|| format!("reading config {}", config.display()))?,
+            )?;
+            simulate_route(
+                &map,
+                &input,
+                point_arg(&start, "start")?,
+                point_arg(&goal, "goal")?,
+                initial_yaw_deg,
+                &cfg,
+            )
+        }
     }
+}
+
+fn point_arg(values: &[f32], name: &str) -> Result<Waypoint> {
+    if values.len() != 2 || values.iter().any(|value| !value.is_finite()) {
+        anyhow::bail!("--{name} requires two finite metre values: X Y");
+    }
+    Ok(Waypoint {
+        x_m: values[0],
+        y_m: values[1],
+    })
+}
+
+#[derive(Deserialize)]
+struct PlanRequest {
+    start: Waypoint,
+    goal: Waypoint,
+}
+
+fn serve_ui(map_path: &PathBuf, bind: &str, margin_m: f32) -> Result<()> {
+    let listener = TcpListener::bind(bind).with_context(|| format!("binding UI at {bind}"))?;
+    info!(
+        address = bind,
+        "planning UI ready (planning only; motor output disabled)"
+    );
+    println!("Ouvrir http://{bind}");
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = handle_ui_request(stream, map_path, margin_m) {
+                    warn!(%error, "UI request failed");
+                }
+            }
+            Err(error) => warn!(%error, "UI connection failed"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_ui_request(mut stream: TcpStream, map_path: &PathBuf, margin_m: f32) -> Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end;
+    loop {
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            anyhow::bail!("client closed before request headers");
+        }
+        request.extend_from_slice(&chunk[..count]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            header_end = index + 4;
+            break;
+        }
+        if request.len() > 16_384 {
+            anyhow::bail!("HTTP headers too large");
+        }
+    }
+    let header = std::str::from_utf8(&request[..header_end])?.to_owned();
+    let first = header.lines().next().unwrap_or("").to_owned();
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("").to_owned();
+    let route = parts.next().unwrap_or("/").to_owned();
+    let content_length = header
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    if content_length > 16_384 {
+        return write_http(
+            &mut stream,
+            "413 Payload Too Large",
+            "application/json",
+            br#"{"error":"body too large"}"#,
+        );
+    }
+    while request.len() - header_end < content_length {
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            anyhow::bail!("client closed during request body");
+        }
+        request.extend_from_slice(&chunk[..count]);
+    }
+    match (method.as_str(), route.as_str()) {
+        ("GET", "/") => write_http(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            include_bytes!("ui.html"),
+        ),
+        ("GET", "/api/map") => {
+            let map = OccupancyMap::load_yaml(map_path)?;
+            let body = serde_json::to_vec(&map_view(&map))?;
+            write_http(&mut stream, "200 OK", "application/json", &body)
+        }
+        ("POST", "/api/plan") => {
+            let result = (|| -> Result<_> {
+                let body: PlanRequest =
+                    serde_json::from_slice(&request[header_end..header_end + content_length])?;
+                let map = OccupancyMap::load_yaml(map_path)?;
+                plan_path(&map, body.start, body.goal, margin_m)
+            })();
+            match result {
+                Ok(path) => write_http(
+                    &mut stream,
+                    "200 OK",
+                    "application/json",
+                    &serde_json::to_vec(&serde_json::json!({"path": path}))?,
+                ),
+                Err(error) => write_http(
+                    &mut stream,
+                    "400 Bad Request",
+                    "application/json",
+                    &serde_json::to_vec(&serde_json::json!({"error": error.to_string()}))?,
+                ),
+            }
+        }
+        _ => write_http(
+            &mut stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"not found",
+        ),
+    }
+}
+
+fn write_http(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> Result<()> {
+    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: null\r\n\r\n", body.len())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn simulate_route(
+    map_path: &PathBuf,
+    input: &PathBuf,
+    start: Waypoint,
+    goal: Waypoint,
+    yaw_deg: f32,
+    config: &Config,
+) -> Result<()> {
+    let required = [
+        config.simulation_wheelbase_m,
+        config.simulation_max_steering_rad,
+        config.simulation_servo_center,
+        config.simulation_servo_left,
+        config.simulation_servo_right,
+    ];
+    if required.iter().any(Option::is_none) {
+        anyhow::bail!("simulation path tracking needs explicit simulation_wheelbase_m, simulation_max_steering_rad and servo center/left/right calibration values in config.toml; no guessed vehicle geometry is used");
+    }
+    let wheelbase = config.simulation_wheelbase_m.unwrap();
+    let max_steer = config.simulation_max_steering_rad.unwrap();
+    let servo_center = config.simulation_servo_center.unwrap();
+    let servo_left = config.simulation_servo_left.unwrap();
+    let servo_right = config.simulation_servo_right.unwrap();
+    let map = OccupancyMap::load_yaml(map_path)?;
+    let path = plan_path(&map, start, goal, config.safety_margin_m)?;
+    let scans = load_scans(input)?;
+    let seed = LocalizationPose {
+        x_m: start.x_m,
+        y_m: start.y_m,
+        yaw_rad: yaw_deg.to_radians(),
+    };
+    let records = localize_scans(&map, &scans, seed, config.localization_min_confidence)?;
+    let mut stopped = false;
+    let mut previous_scan_ns = None;
+    for (scan, pose) in scans.iter().zip(records.iter()) {
+        let nearest_front = scan.ranges_m[75..105]
+            .iter()
+            .copied()
+            .filter(|r| *r > 0.0 && *r < lidarcontrol::MAX_RANGE_M)
+            .reduce(f32::min);
+        let stale = previous_scan_ns
+            .is_some_and(|previous: u128| scan.monotonic_ns.saturating_sub(previous) > 500_000_000);
+        let obstacle = nearest_front.is_some_and(|range| range <= config.obstacle_stop_distance_m);
+        let stop = pose.stop || stale || obstacle;
+        if stop {
+            println!(
+                "SIM STOP scan={} reason={}{}{}",
+                pose.scan_index,
+                if pose.stop { "localization " } else { "" },
+                if stale { "stale_scan " } else { "" },
+                if obstacle { "front_obstacle" } else { "" }
+            );
+            stopped = true;
+            break;
+        }
+        previous_scan_ns = Some(scan.monotonic_ns);
+        let command = pure_pursuit(
+            pose.pose,
+            &path,
+            0.40,
+            wheelbase,
+            max_steer,
+            servo_center,
+            servo_left,
+            servo_right,
+            config.simulation_speed_mps,
+        )?;
+        println!("SIM scan={} pose=({:.2},{:.2},{:.1}°) confidence={:.2} servo={:.3} speed={:.2}m/s front_m={:.2}",
+            pose.scan_index, pose.pose.x_m, pose.pose.y_m, pose.pose.yaw_rad.to_degrees(), pose.confidence,
+            command.servo, command.speed_mps, nearest_front.unwrap_or(lidarcontrol::MAX_RANGE_M));
+    }
+    if !stopped {
+        info!(
+            scans = records.len(),
+            route_points = path.len(),
+            "offline navigation replay complete; no actuator was connected"
+        );
+    }
+    Ok(())
 }
 
 fn record(port: &str, baud: u32, output: &PathBuf) -> Result<()> {
@@ -257,6 +672,51 @@ fn map_scans(input: &PathBuf, output: &PathBuf, resolution: f32) -> Result<()> {
     Ok(())
 }
 
+fn localize_log(
+    map_path: &PathBuf,
+    input: &PathBuf,
+    output: &PathBuf,
+    initial_pose: LocalizationPose,
+    minimum_confidence: f32,
+) -> Result<()> {
+    let map = OccupancyMap::load_yaml(map_path)?;
+    let scans = load_scans(input)?;
+    let records = localize_scans(&map, &scans, initial_pose, minimum_confidence)?;
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut writer = BufWriter::new(
+        File::create(output).with_context(|| format!("creating {}", output.display()))?,
+    );
+    for record in &records {
+        serde_json::to_writer(&mut writer, record)?;
+        writer.write_all(b"\n")?;
+        if record.stop {
+            warn!(
+                scan = record.scan_index,
+                confidence = record.confidence,
+                "STOP: localization confidence below threshold"
+            );
+            println!(
+                "STOP scan={} confidence={:.3}",
+                record.scan_index, record.confidence
+            );
+        } else {
+            println!(
+                "scan={} pose=({:.2}, {:.2}, {:.1}°) confidence={:.3}",
+                record.scan_index,
+                record.pose.x_m,
+                record.pose.y_m,
+                record.pose.yaw_rad.to_degrees(),
+                record.confidence
+            );
+        }
+    }
+    writer.flush()?;
+    info!(output = %output.display(), records = records.len(), "localization log written");
+    Ok(())
+}
+
 fn load_scans(input: &PathBuf) -> Result<Vec<ScanRecord>> {
     if input
         .extension()
@@ -320,6 +780,7 @@ fn load_python_collector_csv(input: &PathBuf) -> Result<Vec<ScanRecord>> {
             schema: 1,
             sensor: "LDROBOT_D500_STL_19P".to_owned(),
             timestamp_unix_ms: 0,
+            timestamp_unix_ns: 0,
             monotonic_ns: index as u128,
             source_timestamp: Some(row[0].to_owned()),
             duration_ms: 0.0,
@@ -346,4 +807,90 @@ fn validate_ranges(ranges: &[f32], line: usize) -> Result<()> {
         anyhow::bail!("invalid distance on line {line}");
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct SensorPair {
+    lidar_scan_index: usize,
+    lidar_timestamp_unix_ns: u128,
+    camera_sequence: u64,
+    camera_timestamp_unix_ns: u64,
+    camera_minus_lidar_ms: f64,
+    pose: lidarcontrol::mapping::Pose2,
+    localization_confidence: f32,
+    camera_file: String,
+}
+
+fn sync_sensor_logs(
+    poses_path: &PathBuf,
+    frames_path: &PathBuf,
+    output: &PathBuf,
+    tolerance_ms: u64,
+) -> Result<()> {
+    let poses = read_jsonl::<PoseRecord>(poses_path)?;
+    let frames = read_jsonl::<CameraFrameRecord>(frames_path)?;
+    if poses.is_empty() || frames.is_empty() {
+        anyhow::bail!("LiDAR pose log and camera frame log must both contain records");
+    }
+    if poses.iter().any(|pose| pose.timestamp_unix_ns == 0) {
+        anyhow::bail!("LiDAR pose log has no Unix-nanosecond timestamps; legacy CSV timestamps do not include a timezone");
+    }
+
+    if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut writer = BufWriter::new(
+        File::create(output).with_context(|| format!("creating {}", output.display()))?,
+    );
+    let tolerance_ns = tolerance_ms as i128 * 1_000_000;
+    let mut matched = 0usize;
+    for pose in &poses {
+        let nearest = frames.iter().min_by_key(|frame| {
+            (frame.timestamp_unix_ns as i128 - pose.timestamp_unix_ns as i128).abs()
+        });
+        let Some(frame) = nearest else { continue };
+        let delta_ns = frame.timestamp_unix_ns as i128 - pose.timestamp_unix_ns as i128;
+        if delta_ns.abs() > tolerance_ns {
+            continue;
+        }
+        let pair = SensorPair {
+            lidar_scan_index: pose.scan_index,
+            lidar_timestamp_unix_ns: pose.timestamp_unix_ns,
+            camera_sequence: frame.sequence,
+            camera_timestamp_unix_ns: frame.timestamp_unix_ns,
+            camera_minus_lidar_ms: delta_ns as f64 / 1_000_000.0,
+            pose: pose.pose,
+            localization_confidence: pose.confidence,
+            camera_file: frame.file.clone(),
+        };
+        serde_json::to_writer(&mut writer, &pair)?;
+        writer.write_all(b"\n")?;
+        matched += 1;
+    }
+    writer.flush()?;
+    println!(
+        "timestamp pairs: {matched}/{} scans within {} ms",
+        poses.len(),
+        tolerance_ms
+    );
+    println!("pair log: {}", output.display());
+    Ok(())
+}
+
+fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<Vec<T>> {
+    let reader =
+        BufReader::new(File::open(path).with_context(|| format!("opening {}", path.display()))?);
+    let mut values = Vec::new();
+    for (line_index, line) in reader.lines().enumerate() {
+        let line =
+            line.with_context(|| format!("reading {} line {}", path.display(), line_index + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        values.push(
+            serde_json::from_str(&line)
+                .with_context(|| format!("parsing {} line {}", path.display(), line_index + 1))?,
+        );
+    }
+    Ok(values)
 }

@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod camera;
+pub mod localization;
 pub mod mapping;
+pub mod navigation;
 
 pub const PACKET_HEADER: u8 = 0x54;
 pub const PACKET_VERLEN: u8 = 0x2c;
@@ -21,8 +24,12 @@ pub const MAX_RANGE_M: f32 = 12.0;
 pub struct ScanRecord {
     pub schema: u32,
     pub sensor: String,
-    /// UTC time when the final packet of this revolution was received.
+    /// Approximate host UTC time for the forward-looking bin, in milliseconds.
     pub timestamp_unix_ms: u128,
+    /// Host receive time for the centre-forward LiDAR bin, in Unix nanoseconds.
+    /// It is a transport-time estimate, not a sensor exposure timestamp.
+    #[serde(default)]
+    pub timestamp_unix_ns: u128,
     /// Original timestamp text from legacy CSV logs, whose timezone is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_timestamp: Option<String>,
@@ -36,6 +43,7 @@ pub struct ScanRecord {
 impl ScanRecord {
     fn new(
         timestamp_unix_ms: u128,
+        timestamp_unix_ns: u128,
         monotonic_ns: u128,
         duration_ms: f32,
         ranges_m: Vec<f32>,
@@ -44,6 +52,7 @@ impl ScanRecord {
             schema: 1,
             sensor: "LDROBOT_D500_STL_19P".to_owned(),
             timestamp_unix_ms,
+            timestamp_unix_ns,
             source_timestamp: None,
             monotonic_ns,
             duration_ms,
@@ -150,6 +159,7 @@ pub struct ScanAssembler {
     ranges: Vec<f32>,
     previous_angle: Option<f32>,
     valid_point_count: usize,
+    bin_timestamps_unix_ns: Vec<Option<u128>>,
     scan_started: Option<Instant>,
     process_started: Instant,
     sequence: u64,
@@ -167,6 +177,7 @@ impl ScanAssembler {
             ranges: vec![MAX_RANGE_M; SCAN_BINS],
             previous_angle: None,
             valid_point_count: 0,
+            bin_timestamps_unix_ns: vec![None; SCAN_BINS],
             scan_started: None,
             process_started: Instant::now(),
             sequence: 0,
@@ -178,6 +189,7 @@ impl ScanAssembler {
         &mut self,
         points: &[Point; PACKET_POINT_COUNT],
         received_at: Instant,
+        received_unix_ns: u128,
     ) -> Option<(u64, ScanRecord)> {
         for point in points {
             if let Some(previous) = self.previous_angle {
@@ -187,37 +199,41 @@ impl ScanAssembler {
                         let duration_ms =
                             received_at.duration_since(started).as_secs_f32() * 1000.0;
                         let monotonic_ns = self.process_started.elapsed().as_nanos();
-                        let timestamp_unix_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or(Duration::ZERO)
-                            .as_millis();
+                        // The forward bin better represents this front-only scan
+                        // than the timestamp of the 0° sweep wrap.
+                        let timestamp_unix_ns =
+                            self.bin_timestamps_unix_ns[SCAN_BINS / 2].unwrap_or(received_unix_ns);
+                        let timestamp_unix_ms = timestamp_unix_ns / 1_000_000;
                         let record = ScanRecord::new(
                             timestamp_unix_ms,
+                            timestamp_unix_ns,
                             monotonic_ns,
                             duration_ms,
                             std::mem::replace(&mut self.ranges, vec![MAX_RANGE_M; SCAN_BINS]),
                         );
                         self.valid_point_count = 0;
+                        self.bin_timestamps_unix_ns.fill(None);
                         self.scan_started = Some(received_at);
                         self.sequence += 1;
                         self.previous_angle = Some(point.angle_deg);
-                        self.add_point(*point);
+                        self.add_point(*point, received_unix_ns);
                         return Some((self.sequence, record));
                     }
                     self.ranges.fill(MAX_RANGE_M);
                     self.valid_point_count = 0;
+                    self.bin_timestamps_unix_ns.fill(None);
                     self.scan_started = Some(received_at);
                 }
             } else {
                 self.scan_started = Some(received_at);
             }
-            self.add_point(*point);
+            self.add_point(*point, received_unix_ns);
             self.previous_angle = Some(point.angle_deg);
         }
         None
     }
 
-    fn add_point(&mut self, point: Point) {
+    fn add_point(&mut self, point: Point, received_unix_ns: u128) {
         let signed_angle = if point.angle_deg <= 180.0 {
             point.angle_deg
         } else {
@@ -228,7 +244,10 @@ impl ScanAssembler {
             && point.distance_m <= MAX_RANGE_M
         {
             let bin = ((signed_angle + 90.0) as usize).min(SCAN_BINS - 1);
-            self.ranges[bin] = self.ranges[bin].min(point.distance_m);
+            if point.distance_m <= self.ranges[bin] {
+                self.ranges[bin] = point.distance_m;
+                self.bin_timestamps_unix_ns[bin] = Some(received_unix_ns);
+            }
             self.valid_point_count += 1;
         }
     }
@@ -257,8 +276,14 @@ where
             Ok(0) => continue,
             Ok(n) => {
                 let received_at = Instant::now();
+                let received_unix_ns = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO)
+                    .as_nanos();
                 for packet in decoder.push(&bytes[..n]) {
-                    if let Some((sequence, scan)) = assembler.add_packet(&packet, received_at) {
+                    if let Some((sequence, scan)) =
+                        assembler.add_packet(&packet, received_at, received_unix_ns)
+                    {
                         on_scan(sequence, scan)?;
                     }
                 }
@@ -319,7 +344,7 @@ mod tests {
 
     #[test]
     fn serializes_and_reloads_jsonl_record() {
-        let record = ScanRecord::new(123, 456, 50.0, vec![MAX_RANGE_M; SCAN_BINS]);
+        let record = ScanRecord::new(123, 123_000_000, 456, 50.0, vec![MAX_RANGE_M; SCAN_BINS]);
         let line = serde_json::to_string(&record).unwrap();
         let restored: ScanRecord = serde_json::from_str(&line).unwrap();
         assert_eq!(restored, record);

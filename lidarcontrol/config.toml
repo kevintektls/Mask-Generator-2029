@@ -3,3 +3,17 @@ lidar_port = "/dev/ttyTHS1"
 lidar_baud = 230400
 scan_log = "lidarcontrol/data/scan.jsonl"
 map_resolution_m = 0.05
+camera_bridge_addr = "127.0.0.1:9010"
+camera_output = "lidarcontrol/data/camera"
+camera_sync_tolerance_ms = 80
+localization_min_confidence = 0.30
+safety_margin_m = 0.25
+obstacle_stop_distance_m = 0.30
+simulation_speed_mps = 0.20
+# Vehicle-specific geometry/servo calibration is intentionally unset.
+# Fill these from measurements before using the simulation tracker.
+# simulation_wheelbase_m = 0.0
+# simulation_max_steering_rad = 0.0
+# simulation_servo_center = 0.5
+# simulation_servo_left = 0.0
+# simulation_servo_right = 1.0

@@ -18,7 +18,7 @@ const MAX_MATCH_RMSE_M: f32 = 0.30;
 const MAX_STEP_TRANSLATION_M: f32 = 1.0;
 const MAX_STEP_ROTATION_RAD: f32 = 0.8;
 
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, serde::Deserialize)]
 pub struct Pose2 {
     pub x_m: f32,
     pub y_m: f32,
@@ -26,10 +26,11 @@ pub struct Pose2 {
     pub yaw_rad: f32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct PoseRecord {
     pub scan_index: usize,
     pub timestamp_unix_ms: u128,
+    pub timestamp_unix_ns: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_timestamp: Option<String>,
     pub pose: Pose2,
@@ -279,6 +280,7 @@ pub fn build_map(
         pose_records.push(PoseRecord {
             scan_index,
             timestamp_unix_ms: scan.timestamp_unix_ms,
+            timestamp_unix_ns: scan.timestamp_unix_ns,
             source_timestamp: scan.source_timestamp.clone(),
             pose,
             confidence,
@@ -415,6 +417,7 @@ mod tests {
             schema: 1,
             sensor: "test".into(),
             timestamp_unix_ms: timestamp,
+            timestamp_unix_ns: timestamp * 1_000_000,
             source_timestamp: None,
             monotonic_ns: timestamp * 1_000_000,
             duration_ms: 100.0,
