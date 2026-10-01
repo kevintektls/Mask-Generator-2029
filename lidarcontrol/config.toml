@@ -1,0 +1,4 @@
+# Defaults match the working D500 reader in scripts/Behavioral_Cloning_Lidar.py.
+lidar_port = "/dev/ttyTHS1"
+lidar_baud = 230400
+scan_log = "lidarcontrol/data/scan.jsonl"
