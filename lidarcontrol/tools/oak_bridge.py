@@ -21,11 +21,13 @@ import depthai as dai
 MAGIC = b"OAK1"
 HEADER = struct.Struct("<4sQHHI")
 SYNC_THRESHOLD_MS = 5.0
+MIDDLE_CAMERA_ENABLED = False
 latest_frame = {
     "jpeg": None,
     "timestamp_unix_ns": 0,
     "sequence": 0,
     "left_right_delta_ms": None,
+    "middle_delta_ms": None,
 }
 latest_lock = threading.Lock()
 frame_condition = threading.Condition(latest_lock)
@@ -44,6 +46,8 @@ class PreviewHandler(BaseHTTPRequestHandler):
                         "ready": latest_frame["jpeg"] is not None,
                         "sequence": latest_frame["sequence"],
                         "left_right_delta_ms": latest_frame["left_right_delta_ms"],
+                        "middle_delta_ms": latest_frame["middle_delta_ms"],
+                        "middle_camera_enabled": MIDDLE_CAMERA_ENABLED,
                         "sync_threshold_ms": SYNC_THRESHOLD_MS,
                     },
                     separators=(",", ":"),
@@ -103,9 +107,9 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         page = """<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
-<title>OAK-D Lite stereo preview</title><style>body{background:#111820;color:#e8eef2;font:16px system-ui;margin:2rem}img{width:min(98vw,1200px);background:#222;border-radius:8px}</style>
-<h2>OAK-D Lite · CAM_B gauche | CAM_C droite</h2><img id=frame src='/stream.mjpg'><p id=status>En attente d’une paire synchronisée…</p>
-<script>const s=document.querySelector('#status');async function poll(){try{const d=await (await fetch('/status',{cache:'no-store'})).json();if(d.ready)s.textContent=`Paire synchronisée · séquence ${d.sequence} · écart ${Number(d.left_right_delta_ms).toFixed(3)} ms (seuil ${d.sync_threshold_ms} ms)`}catch(e){s.textContent='Flux caméra déconnecté'}}setInterval(poll,500);poll()</script>""".encode("utf-8")
+<title>OAK-D Lite camera preview</title><style>body{background:#111820;color:#e8eef2;font:16px system-ui;margin:2rem}img{width:min(98vw,1600px);background:#222;border-radius:8px}</style>
+<h2 id=title>OAK-D Lite · CAM_B gauche | CAM_C droite</h2><img id=frame src='/stream.mjpg'><p id=status>En attente d’une paire synchronisée…</p>
+<script>const s=document.querySelector('#status'),t=document.querySelector('#title');async function poll(){try{const d=await (await fetch('/status',{cache:'no-store'})).json();t.textContent=d.middle_camera_enabled?'OAK-D Lite · CAM_B gauche | CAM_A couleur | CAM_C droite':'OAK-D Lite · CAM_B gauche | CAM_C droite';if(d.ready)s.textContent=d.middle_camera_enabled?`Flux 3 caméras · séq. ${d.sequence} · CAM_B/CAM_C ${Number(d.left_right_delta_ms).toFixed(2)} ms · CAM_A/CAM_B ${Number(d.middle_delta_ms).toFixed(2)} ms`:`Paire synchronisée · séquence ${d.sequence} · écart ${Number(d.left_right_delta_ms).toFixed(3)} ms (seuil ${d.sync_threshold_ms} ms)`}catch(e){s.textContent='Flux caméra déconnecté'}}setInterval(poll,500);poll()</script>""".encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -113,7 +117,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
         self.wfile.write(page)
 
 
-def build_pipeline(fps: int) -> dai.Pipeline:
+def build_pipeline(fps: int, midlecam: bool = False) -> dai.Pipeline:
     pipeline = dai.Pipeline()
     left = pipeline.create(dai.node.MonoCamera)
     left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
@@ -136,11 +140,52 @@ def build_pipeline(fps: int) -> dai.Pipeline:
     output.input.setBlocking(False)
     output.input.setQueueSize(2)
     sync.out.link(output.input)
+
+    if midlecam:
+        middle = pipeline.create(dai.node.ColorCamera)
+        middle.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        middle.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        middle.setPreviewSize(640, 360)
+        middle.setFps(fps)
+
+        middle_output = pipeline.create(dai.node.XLinkOut)
+        middle_output.setStreamName("middle")
+        middle_output.input.setBlocking(False)
+        middle_output.input.setQueueSize(2)
+        middle.preview.link(middle_output.input)
     return pipeline
 
 
+def as_bgr(frame):
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    if frame.ndim == 3 and frame.shape[2] == 1:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    return frame
+
+
+def fit_frame(frame, width: int, height: int):
+    frame = as_bgr(frame)
+    frame_height, frame_width = frame.shape[:2]
+    scale = min(width / frame_width, height / frame_height)
+    resized_width = max(1, round(frame_width * scale))
+    resized_height = max(1, round(frame_height * scale))
+    resized = cv2.resize(frame, (resized_width, resized_height))
+    horizontal = width - resized_width
+    vertical = height - resized_height
+    return cv2.copyMakeBorder(
+        resized,
+        vertical // 2,
+        vertical - vertical // 2,
+        horizontal // 2,
+        horizontal - horizontal // 2,
+        cv2.BORDER_CONSTANT,
+        value=(0, 0, 0),
+    )
+
+
 def main() -> None:
-    global SYNC_THRESHOLD_MS
+    global SYNC_THRESHOLD_MS, MIDDLE_CAMERA_ENABLED
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9010)
@@ -149,6 +194,11 @@ def main() -> None:
     parser.add_argument("--jpeg-quality", type=int, default=80)
     parser.add_argument("--preview-host", default="0.0.0.0")
     parser.add_argument("--preview-port", type=int, default=9011)
+    parser.add_argument(
+        "--midlecam",
+        action="store_true",
+        help="inclut la caméra couleur centrale CAM_A dans l'aperçu",
+    )
     args = parser.parse_args()
     if not 1 <= args.fps <= 24:
         parser.error("--fps must be in [1, 24]")
@@ -157,6 +207,7 @@ def main() -> None:
     if not 30 <= args.jpeg_quality <= 100:
         parser.error("--jpeg-quality must be in [30, 100]")
     SYNC_THRESHOLD_MS = args.sync_threshold_ms
+    MIDDLE_CAMERA_ENABLED = args.midlecam
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -168,12 +219,23 @@ def main() -> None:
     print(f"[oak_bridge] camera preview at http://<jetson-ip>:{args.preview_port}/")
     print(f"[oak_bridge] waiting for optional Rust recorder on {args.host}:{args.port}")
 
-    pipeline = build_pipeline(args.fps)
+    pipeline = build_pipeline(args.fps, args.midlecam)
     conn = None
     with dai.Device(pipeline) as device:
         queue = device.getOutputQueue(name="stereo", maxSize=2, blocking=False)
+        middle_queue = (
+            device.getOutputQueue(name="middle", maxSize=2, blocking=False)
+            if args.midlecam
+            else None
+        )
+        middle_frame = None
+        middle_timestamp = None
+        if args.midlecam:
+            camera_layout = "CAM_B/CAM_A couleur/CAM_C"
+        else:
+            camera_layout = "CAM_B/CAM_C"
         print(
-            f"[oak_bridge] synchronized CAM_B/CAM_C 640x480 @ {args.fps} fps; "
+            f"[oak_bridge] {camera_layout} @ {args.fps} fps; "
             f"threshold={SYNC_THRESHOLD_MS:g} ms"
         )
         while True:
@@ -200,7 +262,29 @@ def main() -> None:
 
             left_frame = left_packet.getCvFrame()
             right_frame = right_packet.getCvFrame()
-            stereo_frame = cv2.hconcat((left_frame, right_frame))
+            middle_delta_ms = None
+            if middle_queue is not None:
+                next_middle = middle_queue.tryGet()
+                while next_middle is not None:
+                    middle_frame = next_middle.getCvFrame()
+                    middle_timestamp = next_middle.getTimestampDevice()
+                    next_middle = middle_queue.tryGet()
+                if middle_frame is None or middle_timestamp is None:
+                    continue
+                middle_delta_ms = (
+                    middle_timestamp - left_timestamp
+                ).total_seconds() * 1000.0
+                frame_height = left_frame.shape[0]
+                frame_width = left_frame.shape[1]
+                stereo_frame = cv2.hconcat(
+                    (
+                        as_bgr(left_frame),
+                        fit_frame(middle_frame, frame_width, frame_height),
+                        as_bgr(right_frame),
+                    )
+                )
+            else:
+                stereo_frame = cv2.hconcat((left_frame, right_frame))
             timestamp_unix_ns = time.time_ns()
             ok, encoded = cv2.imencode(
                 ".jpg", stereo_frame, [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality]
@@ -214,6 +298,7 @@ def main() -> None:
                 latest_frame["timestamp_unix_ns"] = timestamp_unix_ns
                 latest_frame["sequence"] = latest_frame.get("sequence", 0) + 1
                 latest_frame["left_right_delta_ms"] = delta_ms
+                latest_frame["middle_delta_ms"] = middle_delta_ms
                 frame_condition.notify_all()
             if conn is not None:
                 try:

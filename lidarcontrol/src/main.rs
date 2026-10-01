@@ -43,6 +43,9 @@ enum Command {
         /// Address used by the remote gamepad command listener.
         #[arg(long, default_value = "127.0.0.1:5010")]
         control_bind: String,
+        /// Add the centered RGB camera (CAM_A) to the stereo preview.
+        #[arg(long)]
+        midlecam: bool,
     },
     /// Read a local Mac gamepad and send its state through an SSH tunnel.
     #[cfg(target_os = "macos")]
@@ -225,12 +228,13 @@ fn main() -> Result<()> {
             config,
             remote_control,
             control_bind,
+            midlecam,
         } => {
             let config_text = fs::read_to_string(&config)
                 .with_context(|| format!("reading config {}", config.display()))?;
             let config: Config = toml::from_str(&config_text)
                 .with_context(|| format!("parsing config {}", config.display()))?;
-            start_preview_and_controller(&config, remote_control, &control_bind)
+            start_preview_and_controller(&config, remote_control, &control_bind, midlecam)
         }
         #[cfg(target_os = "macos")]
         Command::RemoteClient { port } => run_remote_client(port),
@@ -518,6 +522,7 @@ fn start_preview_and_controller(
     config: &Config,
     remote_control: bool,
     control_bind: &str,
+    midlecam: bool,
 ) -> Result<()> {
     if remote_control
         && !control_bind.starts_with("127.0.0.1:")
@@ -553,7 +558,7 @@ fn start_preview_and_controller(
     }
     check_manual_controller_dependencies(&controller_script, &repo_root, remote_control)?;
 
-    let mut camera = spawn_camera_bridge(&bridge_script, &repo_root, config)?;
+    let mut camera = spawn_camera_bridge(&bridge_script, &repo_root, config, midlecam)?;
     info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
 
     info!(
@@ -647,7 +652,7 @@ fn start_preview_and_controller(
         if let Some(status) = camera.try_wait()? {
             warn!(%status, "camera bridge stopped; retrying in 3 seconds while manual control stays up");
             std::thread::sleep(std::time::Duration::from_secs(3));
-            camera = spawn_camera_bridge(&bridge_script, &repo_root, config)?;
+            camera = spawn_camera_bridge(&bridge_script, &repo_root, config, midlecam)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -657,14 +662,20 @@ fn spawn_camera_bridge(
     bridge_script: &std::path::Path,
     repo_root: &std::path::Path,
     config: &Config,
+    midlecam: bool,
 ) -> Result<Child> {
-    ProcessCommand::new(PYTHON_EXECUTABLE)
+    let mut command = ProcessCommand::new(PYTHON_EXECUTABLE);
+    command
         .arg(bridge_script)
         .arg("--fps")
         .arg(config.camera_fps.to_string())
         .arg("--sync-threshold-ms")
         .arg(config.camera_sync_threshold_ms.to_string())
-        .current_dir(repo_root)
+        .current_dir(repo_root);
+    if midlecam {
+        command.arg("--midlecam");
+    }
+    command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

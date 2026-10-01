@@ -39,6 +39,12 @@ export JETSON_REPO_PATH=/home/robotcar/Mask-Generator-2029
 ./lidarcontrol/start_from_mac.sh
 ```
 
+Pour ajouter la caméra couleur centrale CAM_A à l’aperçu, passe l’option :
+
+```bash
+./lidarcontrol/start_from_mac.sh --midlecam
+```
+
 `JETSON_SSH_TARGET` peut être un alias déjà configuré dans `~/.ssh/config`.
 Le chemin par défaut du dépôt Jetson est `/home/robotcar/Mask-Generator-2029`.
 Synchronise cette version du dépôt sur la Jetson avant le premier lancement.
@@ -58,7 +64,9 @@ met l’acquisition en attente. Le choix REC est conservé : aucune ligne n’es
 fois tous les appareils reconnectés et RT/LT relâchés. Le pont caméra est
 relancé automatiquement par lidarcontrol s’il s’arrête.
 
-La caméra affiche CAM_B à gauche et CAM_C à droite en paires synchronisées.
+Par défaut, la caméra affiche CAM_B à gauche et CAM_C à droite en paires
+synchronisées. `--midlecam` ajoute CAM_A en couleur au centre, sans modifier
+la synchronisation de la paire stéréo.
 Le delta effectif apparaît sous l’image ; le seuil est
 `camera_sync_threshold_ms` (5 ms par défaut). Après avoir vérifié plusieurs
 paires, appuyer sur A puis conduire manuellement pour enregistrer un tour de
@@ -130,10 +138,11 @@ faire bouger la voiture.
 
 Le pont utilise DepthAI v2.29 et les mêmes sockets/résolutions que les scripts
 stéréo du dépôt : `CAM_B` gauche et `CAM_C` droite, `THE_480_P`, même FPS. Un
-Sync node associe les frames par timestamp avec un seuil de 5 ms. Les paires
-hors seuil ne sont pas affichées ni transmises. La preview montre la paire
-côte-à-côte et son delta mesuré. Le receiver Rust enregistre cette image
-composite JPEG à 1280×480 avec le timestamp hôte de réception.
+Sync node associe ces deux frames par timestamp avec un seuil de 5 ms. Les
+paires hors seuil ne sont pas affichées ni transmises. Avec `--midlecam`,
+`CAM_A` fournit une vue couleur 640×360 à la même cadence ; elle apparaît entre
+les deux vues mono, avec son écart temporel affiché. Le receiver Rust enregistre
+l’image composite JPEG à 1280×480 par défaut ou 1920×480 avec `--midlecam`.
 
 Terminal 1 sur la Jetson — démarre la caméra et son endpoint d’image local :
 

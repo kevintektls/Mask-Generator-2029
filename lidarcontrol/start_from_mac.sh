@@ -23,7 +23,17 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 REMOTE_REPO_PATH="$(printf '%q' "$JETSON_REPO_PATH")"
-REMOTE_COMMAND="cd $REMOTE_REPO_PATH && ./lidarcontrol/start.sh --remote-control --control-bind 127.0.0.1:$CONTROL_PORT"
+REMOTE_MIDDLECAM=""
+for argument in "$@"; do
+  case "$argument" in
+    --midlecam) REMOTE_MIDDLECAM=" --midlecam" ;;
+    *)
+      echo "Option inconnue : $argument (option disponible : --midlecam)." >&2
+      exit 2
+      ;;
+  esac
+done
+REMOTE_COMMAND="cd $REMOTE_REPO_PATH && ./lidarcontrol/start.sh --remote-control --control-bind 127.0.0.1:$CONTROL_PORT$REMOTE_MIDDLECAM"
 SSH_PID=""
 cleanup() {
   if [[ -n "$SSH_PID" ]] && kill -0 "$SSH_PID" 2>/dev/null; then
