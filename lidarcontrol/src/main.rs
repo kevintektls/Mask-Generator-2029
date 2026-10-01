@@ -151,6 +151,7 @@ struct Config {
     camera_bridge_addr: String,
     camera_output: PathBuf,
     camera_fps: u32,
+    camera_startup_timeout_s: u64,
     vesc_port: String,
     camera_sync_tolerance_ms: u64,
     localization_min_confidence: f32,
@@ -174,6 +175,7 @@ impl Default for Config {
             camera_bridge_addr: "127.0.0.1:9010".into(),
             camera_output: "lidarcontrol/data/camera".into(),
             camera_fps: 15,
+            camera_startup_timeout_s: 60,
             vesc_port: "/dev/ttyACM0".into(),
             camera_sync_tolerance_ms: 80,
             localization_min_confidence: 0.30,
@@ -349,6 +351,9 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     if !(1..=60).contains(&config.camera_fps) {
         anyhow::bail!("camera_fps must be in [1, 60]");
     }
+    if !(10..=300).contains(&config.camera_startup_timeout_s) {
+        anyhow::bail!("camera_startup_timeout_s must be in [10, 300]");
+    }
     let stopping = Arc::new(AtomicBool::new(false));
     {
         let stopping = Arc::clone(&stopping);
@@ -377,9 +382,22 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         .context("starting OAK-D camera bridge with python3")?;
     info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
 
-    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    info!(
+        timeout_s = config.camera_startup_timeout_s,
+        "waiting for the first OAK-D frame"
+    );
+    let ready_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(config.camera_startup_timeout_s);
     while std::time::Instant::now() < ready_deadline {
+        if stopping.load(Ordering::SeqCst) {
+            stop_child(&mut camera)?;
+            info!("startup cancelled with Ctrl-C");
+            return Ok(());
+        }
         if let Some(status) = camera.try_wait()? {
+            if stopping.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             anyhow::bail!("camera bridge exited before becoming ready ({status})");
         }
         if camera_frame_ready() {
@@ -387,9 +405,17 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if !camera_frame_ready() {
+    if stopping.load(Ordering::SeqCst) {
         stop_child(&mut camera)?;
-        anyhow::bail!("OAK-D produced no preview frame within 20 seconds; LiDAR/VESC controller was not started");
+        info!("startup cancelled with Ctrl-C");
+        return Ok(());
+    }
+    if !camera_frame_ready() {
+        if let Some(status) = camera.try_wait()? {
+            anyhow::bail!("camera bridge exited without producing a preview frame ({status}); see its Python error above");
+        }
+        stop_child(&mut camera)?;
+        anyhow::bail!("OAK-D produced no preview frame within {} seconds; LiDAR/VESC controller was not started", config.camera_startup_timeout_s);
     }
 
     let mut controller = match ProcessCommand::new("python3")
@@ -416,7 +442,6 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     println!("Preview combinée : http://<ip-jetson>:5001/");
     println!("Manette : RT avancer · LT reculer · joystick gauche direction · A enregistrement/pause · LB arrêt");
     println!("Ctrl-C arrête les deux processus.");
-    let stopping = Arc::new(AtomicBool::new(false));
     loop {
         if stopping.load(Ordering::SeqCst) {
             stop_child(&mut controller)?;

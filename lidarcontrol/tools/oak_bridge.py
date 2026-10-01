@@ -10,7 +10,9 @@ import struct
 import threading
 import time
 
+print("[oak_bridge] loading OpenCV (cv2)...", flush=True)
 import cv2
+print("[oak_bridge] loading DepthAI...", flush=True)
 import depthai as dai
 
 
