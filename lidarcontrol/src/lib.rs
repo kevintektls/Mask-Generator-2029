@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod mapping;
+
 pub const PACKET_HEADER: u8 = 0x54;
 pub const PACKET_VERLEN: u8 = 0x2c;
 pub const PACKET_POINT_COUNT: usize = 12;
@@ -21,6 +23,9 @@ pub struct ScanRecord {
     pub sensor: String,
     /// UTC time when the final packet of this revolution was received.
     pub timestamp_unix_ms: u128,
+    /// Original timestamp text from legacy CSV logs, whose timezone is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_timestamp: Option<String>,
     /// Monotonic time since this process started, useful for replay ordering.
     pub monotonic_ns: u128,
     pub duration_ms: f32,
@@ -39,6 +44,7 @@ impl ScanRecord {
             schema: 1,
             sensor: "LDROBOT_D500_STL_19P".to_owned(),
             timestamp_unix_ms,
+            source_timestamp: None,
             monotonic_ns,
             duration_ms,
             ranges_m,

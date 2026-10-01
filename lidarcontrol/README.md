@@ -16,6 +16,37 @@ cargo run --manifest-path lidarcontrol/Cargo.toml -- replay --input chemin/vers/
 Le replay valide le JSONL, le nombre de bins, les distances et l’ordre des
 timestamps. `--speed 0` lit les scans aussi vite que possible.
 
+## Étape 2 : construire la carte 2D
+
+Depuis un enregistrement :
+
+```bash
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- map --input lidarcontrol/data/scan.jsonl
+# ou directement depuis le CSV du collecteur existant :
+cargo run --release --manifest-path lidarcontrol/Cargo.toml -- map --input dataset_lidar/driving_log.csv
+```
+
+La commande produit `lidarcontrol/maps/floor.pgm` (occupation), `floor.yaml`
+(résolution et origine) et `floor.poses.jsonl` (poses estimées et confiance par
+scan). La résolution par défaut est 5 cm par cellule et se règle avec
+`map_resolution_m` dans `config.toml` ou `--resolution`.
+Le CSV existant doit garder l’en-tête `timestamp,servo,duty,lidar` ; le champ
+timestamp ISO local est conservé tel quel dans le journal de poses, car il ne
+contient pas de fuseau horaire.
+
+La pose est estimée par ICP entre scans successifs. Les correspondances trop
+faibles sont rejetées et la pose précédente est conservée ; elles sont
+signalées dans la sortie. C’est un premier mapping séquentiel sans fermeture de
+boucle, pas un SLAM complet. La dérive peut s’accumuler, notamment dans les
+couloirs ou avec peu de structure, et le mouvement pendant un tour du LiDAR
+n’est pas compensé.
+
+Le dépôt contient aussi un viewer polaire dans
+`scripts/Behavioral_Cloning_Lidar.py` (`--preview`, port 5001). Il affiche le
+scan courant du collecteur Python ; il n’affiche pas encore la carte Rust ni la
+caméra. Le collecteur attend également la manette et se connecte au contrôleur
+moteur, donc ne le lance pas comme simple viewer sur une voiture prête à rouler.
+
 ## Enregistrer sur la voiture
 
 Les valeurs par défaut sont dans `lidarcontrol/config.toml` : UART

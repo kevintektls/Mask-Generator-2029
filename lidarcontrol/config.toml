@@ -2,3 +2,4 @@
 lidar_port = "/dev/ttyTHS1"
 lidar_baud = 230400
 scan_log = "lidarcontrol/data/scan.jsonl"
+map_resolution_m = 0.05
