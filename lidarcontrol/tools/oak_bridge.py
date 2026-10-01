@@ -21,6 +21,7 @@ MAGIC = b"OAK1"
 HEADER = struct.Struct("<4sQHHI")
 latest_frame = {"jpeg": None, "timestamp_unix_ns": 0}
 latest_lock = threading.Lock()
+frame_condition = threading.Condition(latest_lock)
 
 
 class PreviewHandler(BaseHTTPRequestHandler):
@@ -52,13 +53,43 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(jpeg)
             return
+        if self.path == "/stream.mjpg":
+            self.send_response(200)
+            self.send_header(
+                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            sequence = -1
+            try:
+                while True:
+                    with frame_condition:
+                        frame_condition.wait_for(
+                            lambda: latest_frame["jpeg"] is not None
+                            and latest_frame["sequence"] != sequence,
+                            timeout=5,
+                        )
+                        jpeg = latest_frame["jpeg"]
+                        current_sequence = latest_frame["sequence"]
+                    if jpeg is None:
+                        continue
+                    self.wfile.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(jpeg)}\r\n\r\n".encode("ascii")
+                        + jpeg
+                        + b"\r\n"
+                    )
+                    sequence = current_sequence
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
         if self.path != "/":
             self.send_error(404)
             return
         page = """<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
 <title>OAK-D Lite preview</title><style>body{background:#111820;color:#e8eef2;font:16px system-ui;margin:2rem}img{width:min(94vw,800px);background:#222;border-radius:8px}</style>
-<h2>OAK-D Lite · CAM_B mono</h2><img id=frame><p id=status>Waiting for camera…</p>
-<script>const f=document.querySelector('#frame'),s=document.querySelector('#status');function poll(){f.src='/frame.jpg?t='+Date.now();f.onload=()=>s.textContent='Live · '+new Date().toLocaleTimeString();f.onerror=()=>s.textContent='Waiting for camera frame…'}setInterval(poll,150);poll()</script>""".encode("utf-8")
+<h2>OAK-D Lite · CAM_B mono</h2><img id=frame src='/stream.mjpg'><p id=status>Waiting for camera…</p>
+<script>const f=document.querySelector('#frame'),s=document.querySelector('#status');f.onload=()=>s.textContent='Live · '+new Date().toLocaleTimeString();f.onerror=()=>s.textContent='Camera stream disconnected'</script>""".encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
@@ -133,9 +164,11 @@ def main() -> None:
                 continue
             height, width = frame.shape[:2]
             payload = encoded.tobytes()
-            with latest_lock:
+            with frame_condition:
                 latest_frame["jpeg"] = payload
                 latest_frame["timestamp_unix_ns"] = timestamp_unix_ns
+                latest_frame["sequence"] = latest_frame.get("sequence", 0) + 1
+                frame_condition.notify_all()
             if conn is not None:
                 try:
                     conn.sendall(HEADER.pack(MAGIC, timestamp_unix_ns, width, height, len(payload)))
