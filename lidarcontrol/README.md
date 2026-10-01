@@ -4,6 +4,26 @@ Programme Rust autonome pour le LDROBOT D500 / STL-19P. Le framing UART, le
 CRC-8, l’interpolation des 12 points et la convention angulaire reprennent le
 lecteur fonctionnel de `scripts/Behavioral_Cloning_Lidar.py`.
 
+## Démarrer la preview combinée et le contrôle manette
+
+Depuis la racine du dépôt, une commande lance le pont caméra puis le viewer
+LiDAR existant avec le contrôle manette/VESC :
+
+```bash
+./lidarcontrol/start.sh
+```
+
+Ouvrir `http://<ip-de-la-jetson>:5001/`. La page attend la première image OAK-D
+avant de lancer le contrôleur LiDAR. La manette doit être branchée à la Jetson.
+RT fait avancer et LT reculer, le joystick gauche dirige, A démarre ou
+met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête les
+deux processus ; le script de conduite envoie alors duty zéro au VESC.
+
+Le lanceur utilise les ports de `config.toml` (LiDAR `/dev/ttyTHS1`, VESC
+`/dev/ttyACM0`, caméra 15 FPS). Il requiert les dépendances Python déjà
+utilisées par les scripts existants (DepthAI, OpenCV, pyserial, pyvesc et
+Gamepad). Il n’exécute pas de navigation autonome.
+
 ## Compiler et valider sans matériel
 
 Depuis la racine du dépôt :
@@ -41,11 +61,12 @@ boucle, pas un SLAM complet. La dérive peut s’accumuler, notamment dans les
 couloirs ou avec peu de structure, et le mouvement pendant un tour du LiDAR
 n’est pas compensé.
 
-Le dépôt contient aussi un viewer polaire dans
-`scripts/Behavioral_Cloning_Lidar.py` (`--preview`, port 5001). Il affiche le
-scan courant du collecteur Python ; il n’affiche pas encore la carte Rust ni la
-caméra. Le collecteur attend également la manette et se connecte au contrôleur
-moteur, donc ne le lance pas comme simple viewer sur une voiture prête à rouler.
+Le viewer de conduite existant `scripts/Behavioral_Cloning_Lidar.py --preview`
+affiche le LiDAR, la caméra OAK-D et les commandes dans une page sur le port
+5001. Il pilote aussi le VESC à partir de la manette : RT/LT accélèrent/freinent,
+le joystick gauche dirige, A active/pause l’enregistrement et LB arrête la
+boucle. Ce programme n’est pas un simple viewer : il ouvre le VESC et peut
+faire bouger la voiture.
 
 ## Étape 3 : capture OAK-D Lite et synchronisation temporelle
 
@@ -54,22 +75,31 @@ mono `CAM_B`, `THE_480_P`, et `getCvFrame()`. Il envoie des JPEG avec leur
 timestamp Unix en nanosecondes. Le receiver Rust enregistre les images dans
 `lidarcontrol/data/camera/frames/` et les indexe dans `frames.jsonl`.
 
-Terminal 1 sur la Jetson :
+Terminal 1 sur la Jetson — démarre la caméra et son endpoint d’image local :
 
 ```bash
 python3 lidarcontrol/tools/oak_bridge.py --fps 15
 ```
 
-Terminal 2 :
+Terminal 2 — uniquement si l’on veut aussi enregistrer les frames caméra :
 
 ```bash
 cargo run --release --manifest-path lidarcontrol/Cargo.toml -- camera-record
 ```
 
-Après connexion du programme Rust, la preview mono est disponible à
-`http://<jetson-ip>:9011/`. Elle affiche seulement la caméra. Pour enregistrer
-en parallèle les scans LiDAR, lancer aussi `lidarcontrol record` dans un autre
-terminal ; le pilotage manuel peut rester dans le contrôleur existant.
+Le pont expose la dernière image sur `http://<jetson-ip>:9011/frame.jpg` sans
+exiger le receiver Rust. Le receiver Rust reste optionnel pour enregistrer les
+frames. Pour avoir LiDAR + caméra sur une seule page et le pilotage manette,
+lancer dans un autre terminal sur la Jetson :
+
+```bash
+python3 scripts/Behavioral_Cloning_Lidar.py --preview
+```
+
+Puis ouvrir `http://<jetson-ip>:5001/`. La page montre les deux capteurs ; la
+manette doit être connectée à la Jetson où tourne le script. Le port caméra
+9011 doit être accessible depuis le navigateur. Ne pas lancer un autre
+programme de contrôle VESC en même temps.
 
 Après avoir produit la carte et le journal de poses, associer chaque pose au
 frame caméra le plus proche :
@@ -172,11 +202,12 @@ cargo run --release --manifest-path lidarcontrol/Cargo.toml -- simulate \
   --start 1.0 1.0 --goal 3.0 2.0 --initial-yaw-deg 0
 ```
 
-Le suivi simulé exige de renseigner `simulation_wheelbase_m`,
-`simulation_max_steering_rad` et les valeurs de servo gauche/centre/droite dans
-`config.toml`. Elles sont volontairement absentes tant que les mesures de la
-voiture ne sont pas fournies. Cette commande est un replay des commandes, pas
-une simulation dynamique complète du véhicule, et ne pilote pas le VESC.
+Le fichier de configuration utilise l’empattement et les commandes servo
+fournis. L’angle maximal est une estimation provisoire de 30° (`0.523599` rad),
+car Traxxas ne publie pas cette valeur dans les caractéristiques consultées.
+Elle sert uniquement au replay logiciel et ne constitue pas une calibration
+pour la voiture. Cette commande rejoue des commandes calculées, ce n’est pas une
+simulation dynamique complète et elle ne pilote pas le VESC.
 
 ## Limites et étape matérielle restante
 

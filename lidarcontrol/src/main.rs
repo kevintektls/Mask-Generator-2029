@@ -11,6 +11,7 @@ use std::io::Read;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -27,6 +28,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start camera preview and the existing gamepad-controlled LiDAR/VESC viewer.
+    Start {
+        #[arg(long, default_value = "lidarcontrol/config.toml")]
+        config: PathBuf,
+    },
     /// Record timestamped 180-bin scans from the D500 to JSON Lines.
     Record {
         #[arg(long, default_value = "lidarcontrol/config.toml")]
@@ -144,6 +150,8 @@ struct Config {
     map_resolution_m: f32,
     camera_bridge_addr: String,
     camera_output: PathBuf,
+    camera_fps: u32,
+    vesc_port: String,
     camera_sync_tolerance_ms: u64,
     localization_min_confidence: f32,
     safety_margin_m: f32,
@@ -165,6 +173,8 @@ impl Default for Config {
             map_resolution_m: 0.05,
             camera_bridge_addr: "127.0.0.1:9010".into(),
             camera_output: "lidarcontrol/data/camera".into(),
+            camera_fps: 15,
+            vesc_port: "/dev/ttyACM0".into(),
             camera_sync_tolerance_ms: 80,
             localization_min_confidence: 0.30,
             safety_margin_m: 0.25,
@@ -188,6 +198,13 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
+        Command::Start { config } => {
+            let config_text = fs::read_to_string(&config)
+                .with_context(|| format!("reading config {}", config.display()))?;
+            let config: Config = toml::from_str(&config_text)
+                .with_context(|| format!("parsing config {}", config.display()))?;
+            start_preview_and_controller(&config)
+        }
         Command::Record {
             config,
             port,
@@ -326,6 +343,148 @@ fn point_arg(values: &[f32], name: &str) -> Result<Waypoint> {
         x_m: values[0],
         y_m: values[1],
     })
+}
+
+fn start_preview_and_controller(config: &Config) -> Result<()> {
+    if !(1..=60).contains(&config.camera_fps) {
+        anyhow::bail!("camera_fps must be in [1, 60]");
+    }
+    let stopping = Arc::new(AtomicBool::new(false));
+    {
+        let stopping = Arc::clone(&stopping);
+        ctrlc::set_handler(move || stopping.store(true, Ordering::SeqCst))
+            .context("installing Ctrl-C handler")?;
+    }
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("lidarcontrol must be inside the repository root")?
+        .to_path_buf();
+    let bridge_script = repo_root.join("lidarcontrol/tools/oak_bridge.py");
+    let controller_script = repo_root.join("scripts/Behavioral_Cloning_Lidar.py");
+    if !bridge_script.is_file() || !controller_script.is_file() {
+        anyhow::bail!("camera bridge or existing LiDAR/gamepad controller script is missing from the repository");
+    }
+
+    let mut camera = ProcessCommand::new("python3")
+        .arg(&bridge_script)
+        .arg("--fps")
+        .arg(config.camera_fps.to_string())
+        .current_dir(&repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("starting OAK-D camera bridge with python3")?;
+    info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
+
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < ready_deadline {
+        if let Some(status) = camera.try_wait()? {
+            anyhow::bail!("camera bridge exited before becoming ready ({status})");
+        }
+        if camera_frame_ready() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if !camera_frame_ready() {
+        stop_child(&mut camera)?;
+        anyhow::bail!("OAK-D produced no preview frame within 20 seconds; LiDAR/VESC controller was not started");
+    }
+
+    let mut controller = match ProcessCommand::new("python3")
+        .arg(&controller_script)
+        .arg("--preview")
+        .arg("--lidar-port")
+        .arg(&config.lidar_port)
+        .arg("--vesc-port")
+        .arg(&config.vesc_port)
+        .current_dir(&repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("starting existing LiDAR/gamepad/VESC controller with python3")
+    {
+        Ok(child) => child,
+        Err(error) => {
+            stop_child(&mut camera)?;
+            return Err(error);
+        }
+    };
+
+    println!("Preview combinée : http://<ip-jetson>:5001/");
+    println!("Manette : RT avancer · LT reculer · joystick gauche direction · A enregistrement/pause · LB arrêt");
+    println!("Ctrl-C arrête les deux processus.");
+    let stopping = Arc::new(AtomicBool::new(false));
+    loop {
+        if stopping.load(Ordering::SeqCst) {
+            stop_child(&mut controller)?;
+            stop_child(&mut camera)?;
+            info!("camera and manual control stopped");
+            return Ok(());
+        }
+        if let Some(status) = controller.try_wait()? {
+            stop_child(&mut camera)?;
+            if status.success() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "LiDAR/gamepad/VESC controller exited with {status}; camera bridge stopped"
+            );
+        }
+        if let Some(status) = camera.try_wait()? {
+            stop_child(&mut controller)?;
+            anyhow::bail!("camera bridge exited with {status}; manual control stopped");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn camera_frame_ready() -> bool {
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    let address: SocketAddr = "127.0.0.1:9011".parse().expect("static socket address");
+    let Ok(mut stream) =
+        TcpStream::connect_timeout(&address, std::time::Duration::from_millis(100))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(250)));
+    if stream
+        .write_all(b"GET /frame.jpg HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0u8; 64];
+    let Ok(count) = stream.read(&mut response) else {
+        return false;
+    };
+    response[..count].starts_with(b"HTTP/1.0 200") || response[..count].starts_with(b"HTTP/1.1 200")
+}
+
+fn stop_child(child: &mut Child) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+    #[cfg(not(unix))]
+    child.kill()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    child.kill()?;
+    let _ = child.wait()?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

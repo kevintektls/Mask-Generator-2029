@@ -85,20 +85,26 @@ def main() -> None:
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((args.host, args.port))
     server.listen(1)
-    print(f"[oak_bridge] waiting for Rust client on {args.host}:{args.port}")
-    conn, address = server.accept()
-    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    print(f"[oak_bridge] Rust client connected from {address}")
-
+    server.setblocking(False)
     preview = ThreadingHTTPServer((args.preview_host, args.preview_port), PreviewHandler)
     threading.Thread(target=preview.serve_forever, daemon=True).start()
     print(f"[oak_bridge] camera preview at http://<jetson-ip>:{args.preview_port}/")
+    print(f"[oak_bridge] waiting for optional Rust recorder on {args.host}:{args.port}")
 
     pipeline = build_pipeline(args.fps)
-    with dai.Device(pipeline) as device, conn:
+    conn = None
+    with dai.Device(pipeline) as device:
         queue = device.getOutputQueue(name="mono", maxSize=2, blocking=False)
         print(f"[oak_bridge] CAM_B mono 640x480 @ {args.fps} fps")
         while True:
+            if conn is None:
+                try:
+                    conn, address = server.accept()
+                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    print(f"[oak_bridge] Rust recorder connected from {address}")
+                except BlockingIOError:
+                    pass
+
             packet = queue.tryGet()
             if packet is None:
                 time.sleep(0.002)
@@ -116,8 +122,14 @@ def main() -> None:
             with latest_lock:
                 latest_frame["jpeg"] = payload
                 latest_frame["timestamp_unix_ns"] = timestamp_unix_ns
-            conn.sendall(HEADER.pack(MAGIC, timestamp_unix_ns, width, height, len(payload)))
-            conn.sendall(payload)
+            if conn is not None:
+                try:
+                    conn.sendall(HEADER.pack(MAGIC, timestamp_unix_ns, width, height, len(payload)))
+                    conn.sendall(payload)
+                except OSError:
+                    print("[oak_bridge] Rust recorder disconnected; preview continues")
+                    conn.close()
+                    conn = None
 
 
 if __name__ == "__main__":
