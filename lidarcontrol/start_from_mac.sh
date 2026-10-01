@@ -2,8 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-CLIENT_SOURCE="$SCRIPT_DIR/tools/xbox360_remote_client.c"
-CLIENT_BINARY="$SCRIPT_DIR/target/xbox360_remote_client"
 CONTROL_PORT="${LIDAR_CONTROL_PORT:-5010}"
 JETSON_SSH_TARGET="${JETSON_SSH_TARGET:-}"
 JETSON_REPO_PATH="${JETSON_REPO_PATH:-/home/robotcar/Mask-Generator-2029}"
@@ -19,22 +17,9 @@ if [[ ! "$CONTROL_PORT" =~ ^[0-9]+$ ]] || (( CONTROL_PORT < 1 || CONTROL_PORT > 
   exit 2
 fi
 
-if ! command -v pkg-config >/dev/null || ! pkg-config --exists libusb-1.0; then
-  echo "libusb et pkg-config sont requis. Sur Mac : brew install libusb pkg-config" >&2
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Cargo est requis sur le Mac. Installe Rust avec rustup, puis relance." >&2
   exit 2
-fi
-if ! command -v cc >/dev/null; then
-  echo "Un compilateur C est requis. Installe les Xcode Command Line Tools." >&2
-  exit 2
-fi
-
-mkdir -p "$SCRIPT_DIR/target"
-if [[ ! -x "$CLIENT_BINARY" || "$CLIENT_SOURCE" -nt "$CLIENT_BINARY" ]]; then
-  # pkg-config supplies the installed libusb include and link flags.
-  LIBUSB_PREFIX="$(pkg-config --variable=prefix libusb-1.0)"
-  cc -std=c11 -O2 -Wall -Wextra -o "$CLIENT_BINARY" "$CLIENT_SOURCE" \
-    -Wl,-rpath,"$LIBUSB_PREFIX/lib" \
-    $(pkg-config --cflags --libs libusb-1.0)
 fi
 
 REMOTE_REPO_PATH="$(printf '%q' "$JETSON_REPO_PATH")"
@@ -55,6 +40,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Démarrage lidarcontrol sur la Jetson via SSH…"
+echo "L'aperçu LiDAR + caméra sera disponible sur http://127.0.0.1:5001/"
 ssh -tt \
   -o ExitOnForwardFailure=yes \
   -o ServerAliveInterval=3 \
@@ -65,5 +51,4 @@ ssh -tt \
   "$JETSON_SSH_TARGET" "$REMOTE_COMMAND" </dev/null &
 SSH_PID=$!
 
-echo "L'aperçu LiDAR + caméra sera disponible sur http://127.0.0.1:5001/"
-"$CLIENT_BINARY" "$CONTROL_PORT"
+cargo run --release --manifest-path "$SCRIPT_DIR/Cargo.toml" -- remote-client --port "$CONTROL_PORT"

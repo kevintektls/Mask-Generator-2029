@@ -19,19 +19,16 @@ RT fait avancer et LT reculer, le joystick gauche dirige, A démarre ou
 met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête les
 deux processus ; le script de conduite envoie alors duty zéro au VESC.
 
-### Brancher le récepteur Xbox 360 au Mac et conduire par SSH
+### Brancher le récepteur Logitech F710 au Mac et conduire par SSH
 
-Le Mac peut lire le récepteur Xbox 360 en USB et envoyer les commandes à la
-Jetson par un tunnel SSH. Le LiDAR, la caméra et le VESC restent connectés à la
-Jetson. Aucun réglage du Wi-Fi n'est requis.
+Le Mac lit le récepteur USB sans fil du Logitech F710 et envoie les commandes à
+la Jetson par un tunnel SSH. Le LiDAR, la caméra et le VESC restent connectés
+à la Jetson. Aucun réglage du Wi-Fi n'est requis.
 
-Sur le Mac, installe `libusb` si nécessaire :
+Sur le F710, place le sélecteur au dos sur `X` (mode XInput). Le client Mac
+utilise `gilrs`, comme le contrôleur Rust déjà fourni avec le dépôt.
 
-```bash
-brew install libusb pkg-config
-```
-
-Depuis la racine du dépôt, lance :
+Depuis la racine du dépôt sur le Mac, lance :
 
 ```bash
 export JETSON_SSH_TARGET=robotcar@ADRESSE_OU_ALIAS
@@ -42,16 +39,14 @@ export JETSON_REPO_PATH=/home/robotcar/Mask-Generator-2029
 `JETSON_SSH_TARGET` peut être un alias déjà configuré dans `~/.ssh/config`.
 Le chemin par défaut du dépôt Jetson est `/home/robotcar/Mask-Generator-2029`.
 Synchronise cette version du dépôt sur la Jetson avant le premier lancement.
-Le lanceur compile une petite application USB sur le Mac, démarre le programme
-capteurs sur la Jetson par SSH et ouvre les tunnels pour le contrôle et les
-aperçus. Ouvre `http://127.0.0.1:5001/` pour afficher LiDAR et caméra. `Ctrl-C`
-ou LB arrête la conduite. Une perte de liaison coupe le moteur en 250 ms ; une
-reprise de liaison nécessite de relâcher RT/LT et de recentrer le joystick.
-
-Le lecteur USB reconnaît les récepteurs Xbox 360 Microsoft `045e:0291`,
-`045e:0719` et `045e:02a9`. Il lit le récepteur directement avec libusb sans
-installer de pilote système. Si le récepteur n'est pas reconnu, la commande
-affiche son erreur avant d'activer la conduite.
+Le lanceur compile le client manette Rust sur le Mac, démarre les capteurs sur
+la Jetson par SSH et ouvre les tunnels pour le contrôle et les aperçus. Au
+premier lancement, Cargo télécharge et compile les dépendances. Ouvre
+`http://127.0.0.1:5001/` pour afficher LiDAR et caméra. RT avance, LT recule,
+le stick gauche dirige, A démarre/met en pause l'enregistrement et LB arrête.
+`Ctrl-C` arrête aussi la voiture. Une perte de liaison coupe le moteur en
+250 ms ; une reprise nécessite de relâcher RT/LT et de recentrer le stick.
+Le script distant charge `~/.cargo/env` si Cargo manque du PATH SSH.
 
 En cas de perte de la caméra, du LiDAR, du VESC ou de la manette, la page
 affiche une grande alerte rouge, tente d’envoyer une commande moteur nulle et
@@ -81,7 +76,7 @@ Le lanceur utilise les ports de `config.toml` (LiDAR `/dev/ttyTHS1`, VESC
 démarrer les capteurs. Si `pyvesc` ou `pyserial` manque :
 `python3.8 -m pip install --user -r requirements.txt`. Le module Gamepad doit être
 installé sur la Jetson uniquement lorsque la manette y est branchée. Le mode Mac
-utilise le lecteur USB local et ne demande pas ce module sur la Jetson. Il
+lit le F710 sur le Mac et ne demande pas ce module sur la Jetson. Il
 n’exécute pas de navigation autonome.
 
 ## Compiler et valider sans matériel

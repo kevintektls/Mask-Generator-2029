@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+#[cfg(target_os = "macos")]
+use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
+
 const PYTHON_EXECUTABLE: &str = "python3.8";
 
 #[derive(Debug, Parser)]
@@ -40,6 +43,12 @@ enum Command {
         /// Address used by the remote gamepad command listener.
         #[arg(long, default_value = "127.0.0.1:5010")]
         control_bind: String,
+    },
+    /// Read a local Mac gamepad and send its state through an SSH tunnel.
+    #[cfg(target_os = "macos")]
+    RemoteClient {
+        #[arg(long, default_value_t = 5010)]
+        port: u16,
     },
     /// Record timestamped 180-bin scans from the D500 to JSON Lines.
     Record {
@@ -223,6 +232,8 @@ fn main() -> Result<()> {
                 .with_context(|| format!("parsing config {}", config.display()))?;
             start_preview_and_controller(&config, remote_control, &control_bind)
         }
+        #[cfg(target_os = "macos")]
+        Command::RemoteClient { port } => run_remote_client(port),
         Command::Record {
             config,
             port,
@@ -353,6 +364,108 @@ fn main() -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn remote_trigger_value(gamepad: &gilrs::Gamepad, button: Button, axis: Axis) -> f32 {
+    let value = if let Some(data) = gamepad.button_data(button) {
+        data.value()
+    } else {
+        let axis_value = gamepad.value(axis);
+        if axis_value < 0.0 {
+            (axis_value + 1.0) * 0.5
+        } else {
+            axis_value
+        }
+    };
+    value.clamp(0.0, 1.0)
+}
+
+#[cfg(target_os = "macos")]
+fn connected_gamepad(gilrs: &Gilrs) -> Option<GamepadId> {
+    gilrs
+        .gamepads()
+        .find_map(|(id, gamepad)| gamepad.is_connected().then_some(id))
+}
+
+#[cfg(target_os = "macos")]
+fn run_remote_client(port: u16) -> Result<()> {
+    let mut gilrs = Gilrs::new()
+        .map_err(|error| anyhow::anyhow!("initialisation de la manette sur le Mac: {error:?}"))?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_flag = Arc::clone(&shutdown);
+    ctrlc::set_handler(move || shutdown_flag.store(true, Ordering::SeqCst))
+        .context("installation du gestionnaire Ctrl-C")?;
+
+    println!("Recherche d'une manette (F710 : sélecteur sur X)…");
+    let gamepad_id = loop {
+        while let Some(Event { .. }) = gilrs.next_event() {}
+        if shutdown.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Some(id) = connected_gamepad(&gilrs) {
+            break id;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+    println!("Manette détectée : {}", gilrs.gamepad(gamepad_id).name());
+
+    let address = format!("127.0.0.1:{port}");
+    let mut stream = loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        match TcpStream::connect(&address) {
+            Ok(stream) => break stream,
+            Err(error) => {
+                eprintln!("Tunnel SSH pas encore prêt ({error}); nouvel essai…");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+    };
+    stream.set_nodelay(true)?;
+    println!("Contrôle actif via le tunnel SSH. Ctrl-C arrête la voiture.");
+
+    let result = (|| -> Result<()> {
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            while let Some(Event { id, event, .. }) = gilrs.next_event() {
+                if id == gamepad_id && matches!(event, EventType::Disconnected) {
+                    println!("Manette déconnectée : arrêt de la voiture.");
+                    write!(stream, "{{\"type\":\"stop\"}}\n")?;
+                    stream.flush()?;
+                    return Ok(());
+                }
+            }
+            let gamepad = gilrs.gamepad(gamepad_id);
+            if !gamepad.is_connected() {
+                write!(stream, "{{\"type\":\"stop\"}}\n")?;
+                stream.flush()?;
+                break;
+            }
+            let rt = (remote_trigger_value(&gamepad, Button::RightTrigger2, Axis::RightZ) * 255.0)
+                .round() as u8;
+            let lt = (remote_trigger_value(&gamepad, Button::LeftTrigger2, Axis::LeftZ) * 255.0)
+                .round() as u8;
+            let lx = (gamepad.value(Axis::LeftStickX).clamp(-1.0, 1.0) * 32767.0).round() as i16;
+            let a = gamepad.is_pressed(Button::South);
+            let lb = gamepad.is_pressed(Button::LeftTrigger);
+            writeln!(
+                stream,
+                "{{\"rt\":{rt},\"lt\":{lt},\"lx\":{lx},\"a\":{a},\"lb\":{lb}}}"
+            )?;
+            stream.flush()?;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            write!(stream, "{{\"type\":\"stop\"}}\n")?;
+            stream.flush()?;
+        }
+        Ok(())
+    })();
+    result
+}
+
 fn point_arg(values: &[f32], name: &str) -> Result<Waypoint> {
     if values.len() != 2 || values.iter().any(|value| !value.is_finite()) {
         anyhow::bail!("--{name} requires two finite metre values: X Y");
@@ -368,7 +481,10 @@ fn start_preview_and_controller(
     remote_control: bool,
     control_bind: &str,
 ) -> Result<()> {
-    if remote_control && !control_bind.starts_with("127.0.0.1:") && !control_bind.starts_with("localhost:") {
+    if remote_control
+        && !control_bind.starts_with("127.0.0.1:")
+        && !control_bind.starts_with("localhost:")
+    {
         anyhow::bail!("remote gamepad control must bind to localhost");
     }
     if !(1..=24).contains(&config.camera_fps) {
