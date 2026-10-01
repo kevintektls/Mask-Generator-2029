@@ -369,6 +369,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     if !bridge_script.is_file() || !controller_script.is_file() {
         anyhow::bail!("camera bridge or existing LiDAR/gamepad controller script is missing from the repository");
     }
+    check_manual_controller_dependencies(&controller_script, &repo_root)?;
 
     let mut camera = ProcessCommand::new("python3")
         .arg(&bridge_script)
@@ -467,7 +468,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
 }
 
 fn camera_frame_ready() -> bool {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::SocketAddr;
     let address: SocketAddr = "127.0.0.1:9011".parse().expect("static socket address");
     let Ok(mut stream) =
@@ -477,16 +478,34 @@ fn camera_frame_ready() -> bool {
     };
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(250)));
     if stream
-        .write_all(b"GET /frame.jpg HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /status HTTP/1.0\r\nHost: localhost\r\n\r\n")
         .is_err()
     {
         return false;
     }
-    let mut response = [0u8; 64];
-    let Ok(count) = stream.read(&mut response) else {
+    let mut response = Vec::with_capacity(256);
+    if stream.read_to_end(&mut response).is_err() {
         return false;
-    };
-    response[..count].starts_with(b"HTTP/1.0 200") || response[..count].starts_with(b"HTTP/1.1 200")
+    }
+    (response.starts_with(b"HTTP/1.0 200") || response.starts_with(b"HTTP/1.1 200"))
+        && response
+            .windows(b"\"ready\":true".len())
+            .any(|window| window == b"\"ready\":true")
+}
+
+fn check_manual_controller_dependencies(script: &PathBuf, repo_root: &PathBuf) -> Result<()> {
+    let output = ProcessCommand::new("python3")
+        .arg(script)
+        .arg("--help")
+        .current_dir(repo_root)
+        .output()
+        .context("checking Python dependencies for the manual controller")?;
+    if !output.status.success() {
+        eprint!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!("manual control dependencies are missing. Install them for this Python with: python3 -m pip install --user -r requirements.txt");
+    }
+    Ok(())
 }
 
 fn stop_child(child: &mut Child) -> Result<()> {

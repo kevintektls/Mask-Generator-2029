@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
 import struct
@@ -27,6 +28,17 @@ class PreviewHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
+        if self.path == "/status":
+            with latest_lock:
+                ready = latest_frame["jpeg"] is not None
+            payload = json.dumps({"ready": ready}, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path == "/frame.jpg":
             with latest_lock:
                 jpeg = latest_frame["jpeg"]

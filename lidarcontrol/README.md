@@ -20,9 +20,11 @@ met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête l
 deux processus ; le script de conduite envoie alors duty zéro au VESC.
 
 Le lanceur utilise les ports de `config.toml` (LiDAR `/dev/ttyTHS1`, VESC
-`/dev/ttyACM0`, caméra 15 FPS). Il requiert les dépendances Python déjà
-utilisées par les scripts existants (DepthAI, OpenCV, pyserial, pyvesc et
-Gamepad). Il n’exécute pas de navigation autonome.
+`/dev/ttyACM0`, caméra 15 FPS). Il vérifie les imports du contrôleur avant de
+démarrer les capteurs. Si `pyvesc` ou `pyserial` manque :
+`python3 -m pip install --user -r requirements.txt`. Le module Gamepad doit être
+installé à l’emplacement déjà utilisé par les scripts existants. Il n’exécute
+pas de navigation autonome.
 
 ## Compiler et valider sans matériel
 
