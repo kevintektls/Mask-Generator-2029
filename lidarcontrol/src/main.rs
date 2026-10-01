@@ -435,6 +435,15 @@ fn run_remote_client(port: u16) -> Result<()> {
                             eprintln!("Le serveur de commandes Jetson n'est pas encore prêt; nouvel essai…");
                         }
                     }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        eprintln!("Serveur Jetson connecté sans accusé de disponibilité; compatibilité avec son ancienne version activée.");
+                        break reader.into_inner();
+                    }
                     Err(error) => {
                         if attempts == 1 || attempts % 5 == 0 {
                             eprintln!("En attente du serveur de commandes Jetson ({error}); nouvel essai…");
