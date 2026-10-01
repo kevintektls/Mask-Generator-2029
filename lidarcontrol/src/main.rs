@@ -30,10 +30,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Start camera preview and the existing gamepad-controlled LiDAR/VESC viewer.
+    /// Start camera preview and the LiDAR/VESC viewer.
     Start {
         #[arg(long, default_value = "lidarcontrol/config.toml")]
         config: PathBuf,
+        /// Receive gamepad commands over a localhost TCP socket (for an SSH tunnel).
+        #[arg(long)]
+        remote_control: bool,
+        /// Address used by the remote gamepad command listener.
+        #[arg(long, default_value = "127.0.0.1:5010")]
+        control_bind: String,
     },
     /// Record timestamped 180-bin scans from the D500 to JSON Lines.
     Record {
@@ -206,12 +212,16 @@ fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Start { config } => {
+        Command::Start {
+            config,
+            remote_control,
+            control_bind,
+        } => {
             let config_text = fs::read_to_string(&config)
                 .with_context(|| format!("reading config {}", config.display()))?;
             let config: Config = toml::from_str(&config_text)
                 .with_context(|| format!("parsing config {}", config.display()))?;
-            start_preview_and_controller(&config)
+            start_preview_and_controller(&config, remote_control, &control_bind)
         }
         Command::Record {
             config,
@@ -353,7 +363,14 @@ fn point_arg(values: &[f32], name: &str) -> Result<Waypoint> {
     })
 }
 
-fn start_preview_and_controller(config: &Config) -> Result<()> {
+fn start_preview_and_controller(
+    config: &Config,
+    remote_control: bool,
+    control_bind: &str,
+) -> Result<()> {
+    if remote_control && !control_bind.starts_with("127.0.0.1:") && !control_bind.starts_with("localhost:") {
+        anyhow::bail!("remote gamepad control must bind to localhost");
+    }
     if !(1..=24).contains(&config.camera_fps) {
         anyhow::bail!("camera_fps must be in [1, 24]");
     }
@@ -380,7 +397,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     if !bridge_script.is_file() || !controller_script.is_file() {
         anyhow::bail!("camera bridge or existing LiDAR/gamepad controller script is missing from the repository");
     }
-    check_manual_controller_dependencies(&controller_script, &repo_root)?;
+    check_manual_controller_dependencies(&controller_script, &repo_root, remote_control)?;
 
     let mut camera = spawn_camera_bridge(&bridge_script, &repo_root, config)?;
     info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
@@ -430,6 +447,11 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
         .arg(&config.lidar_port)
         .arg("--vesc-port")
         .arg(&config.vesc_port)
+        .args(if remote_control {
+            vec!["--remote-control", "--control-bind", control_bind]
+        } else {
+            Vec::new()
+        })
         .current_dir(&repo_root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -445,7 +467,12 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     };
 
     println!("Preview combinée : http://<ip-jetson>:5001/");
-    println!("Manette : RT avancer · LT reculer · joystick gauche direction · A enregistrement/pause · LB arrêt");
+    if remote_control {
+        println!("Contrôle manette distant : {control_bind} (tunnel SSH requis)");
+        println!("Manette : RT avancer · LT reculer · joystick gauche direction · A enregistrement/pause · LB arrêt");
+    } else {
+        println!("Manette : RT avancer · LT reculer · joystick gauche direction · A enregistrement/pause · LB arrêt");
+    }
     println!("Ctrl-C arrête les deux processus.");
     loop {
         if stopping.load(Ordering::SeqCst) {
@@ -517,11 +544,20 @@ fn camera_frame_ready() -> bool {
             .any(|window| window == b"\"ready\":true")
 }
 
-fn check_manual_controller_dependencies(script: &PathBuf, repo_root: &PathBuf) -> Result<()> {
-    let output = ProcessCommand::new(PYTHON_EXECUTABLE)
+fn check_manual_controller_dependencies(
+    script: &PathBuf,
+    repo_root: &PathBuf,
+    remote_control: bool,
+) -> Result<()> {
+    let mut command = ProcessCommand::new(PYTHON_EXECUTABLE);
+    command
         .arg(script)
-        .arg("--help")
-        .current_dir(repo_root)
+        .arg("--check-dependencies")
+        .current_dir(repo_root);
+    if remote_control {
+        command.arg("--remote-control");
+    }
+    let output = command
         .output()
         .context("checking Python dependencies for the manual controller")?;
     if !output.status.success() {
