@@ -25,8 +25,11 @@ Le Mac lit le récepteur USB sans fil du Logitech F710 et envoie les commandes �
 la Jetson par un tunnel SSH. Le LiDAR, la caméra et le VESC restent connectés
 à la Jetson. Aucun réglage du Wi-Fi n'est requis.
 
-Sur le F710, place le sélecteur au dos sur `X` (mode XInput). Le client Mac
-utilise `gilrs`, comme le contrôleur Rust déjà fourni avec le dépôt.
+Sur le F710, place le sélecteur au dos sur `D` (mode DirectInput), puis
+débranche et rebranche le récepteur. En mode `X`, le Mac voit le récepteur
+comme un périphérique USB Logitech, mais pas comme une manette HID ; le client
+`gilrs` ne peut alors pas lire ses commandes. Le mode `D` est nécessaire pour
+que macOS expose les contrôles au client.
 
 Depuis la racine du dépôt sur le Mac, lance :
 

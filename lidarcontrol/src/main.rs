@@ -395,7 +395,7 @@ fn run_remote_client(port: u16) -> Result<()> {
     ctrlc::set_handler(move || shutdown_flag.store(true, Ordering::SeqCst))
         .context("installation du gestionnaire Ctrl-C")?;
 
-    println!("Recherche d'une manette (F710 : sélecteur sur X)…");
+    println!("Recherche d'une manette (F710 : sélecteur sur D pour macOS)…");
     let gamepad_id = loop {
         while let Some(Event { .. }) = gilrs.next_event() {}
         if shutdown.load(Ordering::SeqCst) {
