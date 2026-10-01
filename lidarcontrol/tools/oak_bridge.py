@@ -36,7 +36,8 @@ class PreviewHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        if self.path == "/status":
+        path = self.path.split("?", 1)[0]
+        if path == "/status":
             with latest_lock:
                 payload = json.dumps(
                     {
@@ -55,7 +56,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
             return
-        if self.path == "/frame.jpg":
+        if path == "/frame.jpg":
             with latest_lock:
                 jpeg = latest_frame["jpeg"]
             if jpeg is None:
@@ -68,7 +69,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(jpeg)
             return
-        if self.path == "/stream.mjpg":
+        if path == "/stream.mjpg":
             self.send_response(200)
             self.send_header(
                 "Content-Type", "multipart/x-mixed-replace; boundary=frame"
@@ -98,7 +99,7 @@ class PreviewHandler(BaseHTTPRequestHandler):
                     sequence = current_sequence
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 return
-        if self.path != "/":
+        if path != "/":
             self.send_error(404)
             return
         page = """<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>

@@ -382,18 +382,7 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
     }
     check_manual_controller_dependencies(&controller_script, &repo_root)?;
 
-    let mut camera = ProcessCommand::new(PYTHON_EXECUTABLE)
-        .arg(&bridge_script)
-        .arg("--fps")
-        .arg(config.camera_fps.to_string())
-        .arg("--sync-threshold-ms")
-        .arg(config.camera_sync_threshold_ms.to_string())
-        .current_dir(&repo_root)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("starting OAK-D camera bridge with python3.8")?;
+    let mut camera = spawn_camera_bridge(&bridge_script, &repo_root, config)?;
     info!("starting camera; waiting for its first frame before launching LiDAR/gamepad control");
 
     info!(
@@ -475,11 +464,31 @@ fn start_preview_and_controller(config: &Config) -> Result<()> {
             );
         }
         if let Some(status) = camera.try_wait()? {
-            stop_child(&mut controller)?;
-            anyhow::bail!("camera bridge exited with {status}; manual control stopped");
+            warn!(%status, "camera bridge stopped; retrying in 3 seconds while manual control stays up");
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            camera = spawn_camera_bridge(&bridge_script, &repo_root, config)?;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+}
+
+fn spawn_camera_bridge(
+    bridge_script: &std::path::Path,
+    repo_root: &std::path::Path,
+    config: &Config,
+) -> Result<Child> {
+    ProcessCommand::new(PYTHON_EXECUTABLE)
+        .arg(bridge_script)
+        .arg("--fps")
+        .arg(config.camera_fps.to_string())
+        .arg("--sync-threshold-ms")
+        .arg(config.camera_sync_threshold_ms.to_string())
+        .current_dir(repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("starting OAK-D camera bridge with python3.8")
 }
 
 fn camera_frame_ready() -> bool {

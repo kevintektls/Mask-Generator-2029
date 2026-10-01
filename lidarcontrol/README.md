@@ -19,6 +19,13 @@ RT fait avancer et LT reculer, le joystick gauche dirige, A démarre ou
 met en pause l’enregistrement et LB arrête le contrôleur. `Ctrl-C` arrête les
 deux processus ; le script de conduite envoie alors duty zéro au VESC.
 
+En cas de perte de la caméra, du LiDAR, du VESC ou de la manette, la page
+affiche une grande alerte rouge, tente d’envoyer une commande moteur nulle et
+met l’acquisition en attente. Le choix REC est conservé : aucune ligne n’est
+écrite pendant la coupure, puis la cartographie reprend automatiquement une
+fois tous les appareils reconnectés et RT/LT relâchés. Le pont caméra est
+relancé automatiquement par lidarcontrol s’il s’arrête.
+
 La caméra affiche CAM_B à gauche et CAM_C à droite en paires synchronisées.
 Le delta effectif apparaît sous l’image ; le seuil est
 `camera_sync_threshold_ms` (5 ms par défaut). Après avoir vérifié plusieurs
