@@ -248,6 +248,12 @@ class RemoteControl:
                     connection, peer = listener.accept()
                 except socket.timeout:
                     continue
+                try:
+                    connection.sendall(b'{"type":"ready"}\n')
+                except OSError as exc:
+                    print(f"[WARNING] Client manette fermé avant l'initialisation : {exc}")
+                    connection.close()
+                    continue
                 print(f"[INFO] Client manette connecté depuis {peer[0]}")
                 with connection:
                     connection.settimeout(0.5)

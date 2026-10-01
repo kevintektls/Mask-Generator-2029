@@ -409,17 +409,46 @@ fn run_remote_client(port: u16) -> Result<()> {
     println!("Manette détectée : {}", gilrs.gamepad(gamepad_id).name());
 
     let address = format!("127.0.0.1:{port}");
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let mut attempts = 0u32;
     let mut stream = loop {
         if shutdown.load(Ordering::SeqCst) {
             return Ok(());
         }
+        if std::time::Instant::now() >= ready_deadline {
+            anyhow::bail!("le récepteur de commandes de la Jetson n'est pas devenu prêt; vérifie que le démarrage LiDAR/caméra a réussi");
+        }
+        attempts += 1;
         match TcpStream::connect(&address) {
-            Ok(stream) => break stream,
+            Ok(stream) => {
+                let mut reader = BufReader::new(stream);
+                reader
+                    .get_mut()
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+                let mut greeting = String::new();
+                match reader.read_line(&mut greeting) {
+                    Ok(_) if greeting.trim() == "{\"type\":\"ready\"}" => {
+                        break reader.into_inner();
+                    }
+                    Ok(_) => {
+                        if attempts == 1 || attempts % 5 == 0 {
+                            eprintln!("Le serveur de commandes Jetson n'est pas encore prêt; nouvel essai…");
+                        }
+                    }
+                    Err(error) => {
+                        if attempts == 1 || attempts % 5 == 0 {
+                            eprintln!("En attente du serveur de commandes Jetson ({error}); nouvel essai…");
+                        }
+                    }
+                }
+            }
             Err(error) => {
-                eprintln!("Tunnel SSH pas encore prêt ({error}); nouvel essai…");
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                if attempts == 1 || attempts % 5 == 0 {
+                    eprintln!("Tunnel SSH pas encore prêt ({error}); nouvel essai…");
+                }
             }
         }
+        std::thread::sleep(std::time::Duration::from_secs(1));
     };
     stream.set_nodelay(true)?;
     println!("Contrôle actif via le tunnel SSH. Ctrl-C arrête la voiture.");

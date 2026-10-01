@@ -51,4 +51,16 @@ ssh -tt \
   "$JETSON_SSH_TARGET" "$REMOTE_COMMAND" </dev/null &
 SSH_PID=$!
 
+# SSH can fail immediately when a previous tunnel already owns one of the
+# local ports. Do not start the gamepad client against that unrelated tunnel.
+for _ in {1..20}; do
+  if ! kill -0 "$SSH_PID" 2>/dev/null; then
+    wait "$SSH_PID" 2>/dev/null || true
+    echo "Le tunnel SSH n'a pas démarré. Vérifie les ports locaux 5010, 5001 et 9011 avec :" >&2
+    echo "lsof -nP -iTCP:5010 -iTCP:5001 -iTCP:9011 -sTCP:LISTEN" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
 cargo run --release --manifest-path "$SCRIPT_DIR/Cargo.toml" -- remote-client --port "$CONTROL_PORT"
