@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import math
+import socket
 import sys
 import threading
 import time
@@ -27,12 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     import Gamepad
 except ImportError:
-    sys.path.insert(0, "/home/robotcar/Gamepad")
-    try:
-        import Gamepad
-    except ImportError:
-        print("[ERROR] Bibliothèque Gamepad introuvable.")
-        sys.exit(1)
+    Gamepad = None
 
 try:
     from pyvesc import VESC
@@ -48,7 +44,6 @@ except ImportError:
 
 
 # Configuration matériel et dataset
-GAMEPAD_TYPE = Gamepad.Xbox360
 AXIS_FORWARD = "RT"
 AXIS_BACKWARD = "LT"
 AXIS_STEERING = "LEFT-X"
@@ -66,6 +61,9 @@ LIDAR_MAX_RANGE_M = 12.0
 LIDAR_BINS = 180
 PREVIEW_HOST = "0.0.0.0"
 PREVIEW_PORT = 5001
+REMOTE_CONTROL_BIND = "127.0.0.1:5010"
+REMOTE_COMMAND_TIMEOUT = 0.24
+REMOTE_COMMAND_RATE = 0.01
 
 MAX_DUTY_CYCLE = 0.10
 SERVO_CENTER = 0.5
@@ -210,6 +208,141 @@ def connect_vesc():
     raise RuntimeError(f"Connexion VESC impossible : {last_error}")
 
 
+class RemoteControl:
+    """Receive Mac gamepad state; the VESC is still written only on the Jetson."""
+
+    def __init__(self, address: str):
+        host, separator, port_text = address.rpartition(":")
+        if not separator or not host:
+            raise ValueError("--control-bind must be HOST:PORT")
+        if host not in ("127.0.0.1", "localhost"):
+            raise ValueError("le contrôle distant doit rester lié à localhost")
+        self.address = (host, int(port_text))
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.last_frame = 0.0
+        self.rt = 0
+        self.lt = 0
+        self.lx = 0
+        self.a = False
+        self.lb = False
+        self.previous_a = False
+        self.recording = False
+        self.armed = False
+        self.connected = False
+        self.listener_thread = threading.Thread(target=self._listen, daemon=True)
+
+    def start(self):
+        self.listener_thread.start()
+
+    def _listen(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(self.address)
+            listener.listen(1)
+            listener.settimeout(0.5)
+            print(f"[INFO] En attente du client manette sur {self.address[0]}:{self.address[1]}")
+            while not self.stop_event.is_set():
+                try:
+                    connection, peer = listener.accept()
+                except socket.timeout:
+                    continue
+                print(f"[INFO] Client manette connecté depuis {peer[0]}")
+                with connection:
+                    connection.settimeout(0.5)
+                    buffer = bytearray()
+                    with self.lock:
+                        self.connected = True
+                        self.armed = False
+                        self.last_frame = 0.0
+                    while not self.stop_event.is_set():
+                        try:
+                            chunk = connection.recv(256)
+                        except socket.timeout:
+                            continue
+                        if not chunk:
+                            break
+                        buffer.extend(chunk)
+                        if len(buffer) > 4096:
+                            raise ValueError("commande manette trop longue")
+                        while b"\n" in buffer:
+                            line, _, remainder = buffer.partition(b"\n")
+                            buffer = bytearray(remainder)
+                            if not line:
+                                continue
+                            self._apply_frame(json.loads(line))
+                with self.lock:
+                    self.connected = False
+                    self.armed = False
+                    self.last_frame = 0.0
+                    self.rt = self.lt = self.lx = 0
+                    self.a = self.lb = False
+                self.stop_event.set()
+                break
+        except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+            print(f"[ERROR] Réception manette interrompue : {exc}")
+            self.stop_event.set()
+        finally:
+            listener.close()
+
+    def _apply_frame(self, frame):
+        if frame.get("type") == "stop":
+            self.stop_event.set()
+            return
+        rt = int(frame["rt"])
+        lt = int(frame["lt"])
+        lx = int(frame["lx"])
+        a = bool(frame["a"])
+        lb = bool(frame["lb"])
+        if not (0 <= rt <= 255 and 0 <= lt <= 255 and -32768 <= lx <= 32767):
+            raise ValueError("valeurs manette hors limites")
+        with self.lock:
+            self.rt, self.lt, self.lx = rt, lt, lx
+            self.a, self.lb = a, lb
+            self.last_frame = time.monotonic()
+            if a and not self.previous_a:
+                self.recording = not self.recording
+                print("[DATASET] " + ("ENREGISTREMENT ACTIF" if self.recording else "PAUSE"))
+            self.previous_a = a
+            if lb:
+                self.recording = False
+                self.stop_event.set()
+            if rt <= 5 and lt <= 5 and abs(lx) < 6000 and not lb:
+                self.armed = True
+
+    def snapshot(self):
+        with self.lock:
+            fresh = self.connected and (time.monotonic() - self.last_frame) <= REMOTE_COMMAND_TIMEOUT
+            if not fresh:
+                self.armed = False
+            armed = self.armed and fresh and not self.lb
+            throttle = (self.rt - self.lt) / 255.0 if armed else 0.0
+            steering = self.lx / 32767.0 if armed else 0.0
+            recording = self.recording
+        duty = apply_deadzone(clamp(throttle, -1.0, 1.0)) * MAX_DUTY_CYCLE
+        servo = clamp(SERVO_CENTER + apply_deadzone(steering) * SERVO_RANGE, 0.0, 1.0)
+        return duty, servo, recording
+
+
+def remote_motor_loop(vesc, remote: RemoteControl):
+    try:
+        while not remote.stop_event.is_set():
+            duty, servo, _ = remote.snapshot()
+            vesc.set_duty_cycle(duty)
+            vesc.set_servo(servo)
+            time.sleep(REMOTE_COMMAND_RATE)
+    except Exception as exc:
+        print(f"[ERROR] Écriture VESC interrompue : {exc}")
+        remote.stop_event.set()
+    finally:
+        try:
+            vesc.set_duty_cycle(0.0)
+            vesc.set_servo(SERVO_CENTER)
+        except Exception as exc:
+            print(f"[WARNING] Arrêt VESC distant incomplet : {exc}")
+
+
 def open_dataset(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
@@ -258,10 +391,10 @@ class LidarPreviewHandler(BaseHTTPRequestHandler):
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview LiDAR + caméra</title>
 <style>body{margin:0;background:#111820;color:#e8eef2;font:15px system-ui;padding:16px;box-sizing:border-box}
 main{width:min(98vw,1400px);margin:auto}h1{font-size:1.2rem;font-weight:600;margin:0 0 10px}.sensors{display:grid;grid-template-columns:1.15fr 1fr;gap:14px;align-items:start}.panel{min-width:0;background:#151e27;border:1px solid #34414c;border-radius:12px;padding:10px;box-sizing:border-box}h2{font-size:1rem;margin:0 0 8px}canvas{display:block;width:100%;background:#151e27;border-radius:8px}#camera{display:block;width:100%;aspect-ratio:8/3;object-fit:contain;background:#0b0f13;border-radius:8px}p{color:#aab7c1;font-variant-numeric:tabular-nums;margin:8px 0}.help{font-size:.9rem}@media(max-width:760px){.sensors{grid-template-columns:1fr}}</style><main>
-<h1>Preview LiDAR + caméra · contrôle manette sur le robot</h1><section class="sensors"><div class="panel"><h2>LiDAR D500</h2>
+<h1>Preview LiDAR + caméra · contrôle manette distant</h1><section class="sensors"><div class="panel"><h2>LiDAR D500</h2>
 <canvas id="radar" width="760" height="520"></canvas><p id="status">Connexion LiDAR…</p></div><div class="panel"><h2>OAK-D Lite · CAM_B gauche / CAM_C droite synchronisées</h2>
 <img id="camera" alt="Flux caméra en attente"><p id="camera-status">Connexion caméra…</p></div></section>
-<p class="help">Manette connectée au robot : RT = avancer, LT = reculer, joystick gauche = direction, A = enregistrer/pause, LB = arrêt.</p></main>
+<p class="help">Manette : RT = avancer, LT = reculer, joystick gauche = direction, A = enregistrer/pause, LB = arrêt.</p></main>
 <script>const c=document.querySelector('#radar'),x=c.getContext('2d'),status=document.querySelector('#status');
 function draw(s){const w=c.width,h=c.height,cx=w/2,cy=h-42,R=Math.min(w/2-30,h-80);x.clearRect(0,0,w,h);x.fillStyle='#151e27';x.fillRect(0,0,w,h);
 for(let m=1;m<=6;m++){let r=R*m/6;x.beginPath();x.arc(cx,cy,r,Math.PI,2*Math.PI);x.strokeStyle='#35424d';x.stroke();x.fillStyle='#aab7c1';x.font='13px system-ui';x.fillText(m+'m',cx+8,cy-r-4)}
@@ -291,6 +424,12 @@ def parse_args():
                         help=f"Adresse d'écoute de l'aperçu (défaut : {PREVIEW_HOST})")
     parser.add_argument("--preview-port", type=int, default=PREVIEW_PORT,
                         help=f"Port HTTP de l'aperçu (défaut : {PREVIEW_PORT})")
+    parser.add_argument("--remote-control", action="store_true",
+                        help="Reçoit la manette depuis un client distant via TCP")
+    parser.add_argument("--control-bind", default=REMOTE_CONTROL_BIND,
+                        help=f"Adresse du client distant (défaut : {REMOTE_CONTROL_BIND})")
+    parser.add_argument("--check-dependencies", action="store_true",
+                        help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -298,6 +437,16 @@ def main() -> int:
     global VESC_PORT
     args = parse_args()
     VESC_PORT = args.vesc_port
+
+    if args.check_dependencies:
+        if not args.remote_control and Gamepad is None:
+            sys.path.insert(0, "/home/robotcar/Gamepad")
+            try:
+                import Gamepad as gamepad_api
+            except ImportError:
+                print("[ERROR] Bibliothèque Gamepad introuvable.")
+                return 1
+        return 0
 
     preview_server = None
     if args.preview:
@@ -309,16 +458,28 @@ def main() -> int:
         threading.Thread(target=preview_server.serve_forever, daemon=True).start()
         print(f"[INFO] Aperçu web : http://<adresse-du-robot>:{args.preview_port}/")
 
-    if not Gamepad.available():
-        print("[INFO] En attente de la manette...")
-        while not Gamepad.available():
-            time.sleep(0.5)
-
-    gamepad = GAMEPAD_TYPE()
-    gamepad.startBackgroundUpdates()
+    gamepad = None
+    if not args.remote_control:
+        if Gamepad is None:
+            sys.path.insert(0, "/home/robotcar/Gamepad")
+            try:
+                import Gamepad as gamepad_api
+            except ImportError:
+                print("[ERROR] Bibliothèque Gamepad introuvable.")
+                return 1
+        else:
+            gamepad_api = Gamepad
+        if not gamepad_api.available():
+            print("[INFO] En attente de la manette...")
+            while not gamepad_api.available():
+                time.sleep(0.5)
+        gamepad = gamepad_api.Xbox360()
+        gamepad.startBackgroundUpdates()
     dataset_handle = None
     lidar = None
     vesc = None
+    remote = RemoteControl(args.control_bind) if args.remote_control else None
+    remote_motor_thread = None
     recording = False
     previous_a = False
 
@@ -336,6 +497,12 @@ def main() -> int:
         with vesc:
             vesc.set_servo(SERVO_CENTER)
             vesc.set_duty_cycle(0.0)
+            if remote is not None:
+                remote.start()
+                remote_motor_thread = threading.Thread(
+                    target=remote_motor_loop, args=(vesc, remote), daemon=True
+                )
+                remote_motor_thread.start()
             print("\n=== COLLECTEUR DATASET LiDAR D500 ===")
             print("RT : avancer | LT : reculer | joystick gauche : direction")
             print("A : démarrer/arrêter l'enregistrement | LB : arrêt immédiat")
@@ -344,26 +511,34 @@ def main() -> int:
             print(f"CSV : {args.csv} | UART LiDAR : {args.lidar_port} @ {LIDAR_BAUDRATE}")
 
             try:
-                while gamepad.isConnected():
-                    if gamepad.isPressed("LB"):
+                while ((remote is None and gamepad.isConnected()) or
+                       (remote is not None and not remote.stop_event.is_set())):
+                    if remote is not None:
+                        duty, servo, recording = remote.snapshot()
+                    else:
+                        duty = servo = 0.0
+                        recording = False
+
+                    if remote is None and gamepad.isPressed("LB"):
                         recording = False
                         print("[STOP] LB pressé : arrêt immédiat.")
                         break
 
-                    a_now = gamepad.isPressed("A")
-                    if a_now and not previous_a:
-                        recording = not recording
-                        print("[DATASET] " + ("ENREGISTREMENT ACTIF" if recording else "PAUSE"))
-                    previous_a = a_now
+                    if remote is None:
+                        a_now = gamepad.isPressed("A")
+                        if a_now and not previous_a:
+                            recording = not recording
+                            print("[DATASET] " + ("ENREGISTREMENT ACTIF" if recording else "PAUSE"))
+                        previous_a = a_now
 
-                    throttle = clamp(
-                        gamepad.axis(AXIS_FORWARD) - gamepad.axis(AXIS_BACKWARD), -1.0, 1.0
-                    )
-                    duty = apply_deadzone(throttle) * MAX_DUTY_CYCLE
-                    steering = apply_deadzone(gamepad.axis(AXIS_STEERING))
-                    servo = clamp(SERVO_CENTER + steering * SERVO_RANGE, 0.0, 1.0)
-                    vesc.set_duty_cycle(duty)
-                    vesc.set_servo(servo)
+                        throttle = clamp(
+                            gamepad.axis(AXIS_FORWARD) - gamepad.axis(AXIS_BACKWARD), -1.0, 1.0
+                        )
+                        duty = apply_deadzone(throttle) * MAX_DUTY_CYCLE
+                        steering = apply_deadzone(gamepad.axis(AXIS_STEERING))
+                        servo = clamp(SERVO_CENTER + steering * SERVO_RANGE, 0.0, 1.0)
+                        vesc.set_duty_cycle(duty)
+                        vesc.set_servo(servo)
 
                     # Les commandes restent stables pendant l'acquisition du tour,
                     # elles décrivent donc bien le scan associé dans le CSV.
@@ -398,6 +573,10 @@ def main() -> int:
                         flush=True,
                     )
             finally:
+                if remote is not None:
+                    remote.stop_event.set()
+                    if remote_motor_thread is not None:
+                        remote_motor_thread.join()
                 # Couper le moteur avant de quitter le contexte pyvesc.
                 vesc.set_duty_cycle(0.0)
                 vesc.set_servo(SERVO_CENTER)
@@ -415,7 +594,8 @@ def main() -> int:
         if preview_server is not None:
             preview_server.shutdown()
             preview_server.server_close()
-        gamepad.stopBackgroundUpdates()
+        if gamepad is not None:
+            gamepad.stopBackgroundUpdates()
         print("\n[INFO] Commandes moteur coupées, ressources fermées.")
     return 0
 
