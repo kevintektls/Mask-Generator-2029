@@ -269,7 +269,7 @@ for(let a=-90;a<=90;a+=30){let t=a*Math.PI/180;x.beginPath();x.moveTo(cx,cy);x.l
 (s.scan||[]).forEach((d,i)=>{if(!(d>0&&d<12))return;let a=(i-90)*Math.PI/180,r=R*Math.min(d,6)/6;x.beginPath();x.arc(cx+Math.sin(a)*r,cy-Math.cos(a)*r,3,0,Math.PI*2);x.fillStyle=d<1?'#ff645e':'#56d891';x.fill()});
 x.fillStyle='#8fbbe0';x.fillRect(cx-1,cy-R,2,R);status.textContent=`${s.recording?'REC':'MANUAL'} · servo ${Number(s.servo).toFixed(2)} · duty ${Number(s.duty).toFixed(3)} · updated ${s.updated_at||'waiting for scan'}`}
 async function poll(){try{const r=await fetch('/scan',{cache:'no-store'});draw(await r.json())}catch(e){status.textContent='Connexion LiDAR perdue ; reconnexion…'}setTimeout(poll,150)}poll();
-const camera=document.querySelector('#camera'),cameraStatus=document.querySelector('#camera-status');function pollCamera(){camera.src=`http://${location.hostname}:9011/frame.jpg?t=${Date.now()}`}camera.onload=()=>cameraStatus.textContent='Caméra en direct';camera.onerror=()=>cameraStatus.textContent='Caméra indisponible — vérifier oak_bridge.py';setInterval(pollCamera,150);pollCamera();</script></html>""".encode("utf-8")
+const camera=document.querySelector('#camera'),cameraStatus=document.querySelector('#camera-status');camera.src=`http://${location.hostname}:9011/stream.mjpg`;camera.onload=()=>cameraStatus.textContent='Caméra en direct';camera.onerror=()=>cameraStatus.textContent='Caméra indisponible — vérifier oak_bridge.py';</script></html>""".encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
