@@ -18,6 +18,8 @@ Exécution depuis la racine du dépôt :
     python3 model/train_lidar.py
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import json
@@ -28,9 +30,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
@@ -81,18 +81,18 @@ def parse_args():
     return parser.parse_args()
 
 
-def find_scan_columns(df: pd.DataFrame, requested: str | None) -> tuple[str | None, list[str]]:
+def find_scan_columns(headers: list[str], requested: str | None) -> tuple[str | None, list[str]]:
     if requested:
-        if requested not in df.columns:
+        if requested not in headers:
             raise ValueError(f"Colonne LiDAR introuvable : {requested}")
         return requested, []
 
     for candidate in ("lidar", "lidar_data", "scan", "ranges"):
-        if candidate in df.columns:
+        if candidate in headers:
             return candidate, []
 
     indexed = []
-    for column in df.columns:
+    for column in headers:
         match = re.fullmatch(r"lidar_(\d+)", str(column))
         if match:
             indexed.append((int(match.group(1)), column))
@@ -118,6 +118,55 @@ def parse_scan(value, row_number: int) -> np.ndarray:
     if scan.size == 0:
         raise ValueError(f"Scan LiDAR vide à la ligne CSV {row_number}.")
     return scan
+
+
+def load_csv_dataset(csv_path: Path, requested_scan_column: str | None):
+    """Lit le CSV avec la bibliothèque standard, sans dépendre de pandas."""
+    scans = []
+    servos = []
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        headers = reader.fieldnames or []
+        missing = {"servo", "duty"} - set(headers)
+        if missing:
+            raise ValueError(f"Colonnes manquantes dans le CSV : {sorted(missing)}")
+        scan_column, scan_columns = find_scan_columns(headers, requested_scan_column)
+
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                servo = float(row.get("servo", ""))
+                duty = float(row.get("duty", ""))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(servo) or not math.isfinite(duty):
+                continue
+            if abs(duty) <= 0.01 or not 0.0 <= servo <= 1.0:
+                continue
+
+            if scan_column is not None:
+                scan = parse_scan(row.get(scan_column, ""), row_number)
+            else:
+                values = []
+                for column in scan_columns:
+                    try:
+                        values.append(float(row.get(column, "")))
+                    except (TypeError, ValueError):
+                        values.append(float("nan"))
+                scan = np.asarray(values, dtype=np.float32).reshape(-1)
+                if scan.size == 0:
+                    raise ValueError(f"Aucun rayon LiDAR à la ligne CSV {row_number}.")
+
+            if scans and scan.size != scans[0].size:
+                raise ValueError(
+                    f"Le scan ligne {row_number} contient {scan.size} rayons, "
+                    f"mais le premier en contient {scans[0].size}."
+                )
+            scans.append(scan)
+            servos.append(servo)
+
+    if len(scans) < 2:
+        raise ValueError("Il faut au moins deux lignes valides (servo dans [0,1], duty non nul).")
+    return np.stack(scans).astype(np.float32), np.asarray(servos, dtype=np.float32)
 
 
 class LidarDataset(Dataset):
@@ -156,52 +205,23 @@ def main():
         print(f"[ERROR] Fichier introuvable : {args.csv}")
         return 1
 
-    df = pd.read_csv(args.csv)
-    required = {"servo", "duty"}
-    missing = required - set(df.columns)
-    if missing:
-        print(f"[ERROR] Colonnes manquantes dans le CSV : {sorted(missing)}")
+    try:
+        scans, servos = load_csv_dataset(args.csv, args.scan_column)
+    except (OSError, ValueError) as exc:
+        print(f"[ERROR] Dataset invalide : {exc}")
         return 1
-    scan_column, scan_columns = find_scan_columns(df, args.scan_column)
-
-    # Préserve l'ordre des lignes du CSV : les lignes doivent être chronologiques.
-    df = df.copy()
-    df["servo"] = pd.to_numeric(df["servo"], errors="coerce")
-    df["duty"] = pd.to_numeric(df["duty"], errors="coerce")
-    df = df.dropna(subset=["servo", "duty"])
-    df = df[(df["duty"].abs() > 0.01) & df["servo"].between(0.0, 1.0)].reset_index(drop=True)
-
-    if len(df) < 2:
-        print("[ERROR] Il faut au moins deux lignes valides (servo dans [0,1], duty non nul).")
-        return 1
-
-    if scan_column is not None:
-        scans = [parse_scan(value, i + 2) for i, value in enumerate(df[scan_column])]
-    else:
-        scans = df[scan_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float32)
-        if scans.shape[1] == 0:
-            print("[ERROR] Aucune colonne de rayon LiDAR.")
-            return 1
-
-    ray_count = len(scans[0]) if isinstance(scans, list) else scans.shape[1]
-    if isinstance(scans, list):
-        if any(len(scan) != ray_count for scan in scans):
-            print("[ERROR] Tous les scans doivent contenir le même nombre de rayons.")
-            return 1
-        scans = np.stack(scans)
     scans = np.nan_to_num(scans, nan=args.max_range, posinf=args.max_range, neginf=0.0)
-    servos = df["servo"].to_numpy(dtype=np.float32)
+    ray_count = scans.shape[1]
 
-    train_idx, val_idx = train_test_split(
-        np.arange(len(df)), test_size=0.2, shuffle=False
-    )
-    if len(train_idx) == 0 or len(val_idx) == 0:
+    # Préserve l'ordre temporel : les 20 % les plus récents servent à valider.
+    split_index = int(len(scans) * 0.8)
+    if split_index == 0 or split_index >= len(scans):
         print("[ERROR] Dataset trop petit pour séparer entraînement et validation.")
         return 1
 
     # Les contextes temporels de validation démarrent au premier scan de validation.
-    train_ds = LidarDataset(scans[train_idx], servos[train_idx], args.max_range)
-    val_ds = LidarDataset(scans[val_idx], servos[val_idx], args.max_range)
+    train_ds = LidarDataset(scans[:split_index], servos[:split_index], args.max_range)
+    val_ds = LidarDataset(scans[split_index:], servos[split_index:], args.max_range)
     workers = 0 if os.name == "nt" else 4
     pin_memory = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
