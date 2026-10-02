@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from queue import Queue, Empty
+from queue import Queue, Full
 from vision_preprocess import make_mask_stereo
 from collections import deque
 
@@ -433,14 +433,21 @@ def build_pipeline() -> dai.Pipeline:
 
 def disk_writer():
     while True:
+        item = write_queue.get()
         try:
-            img_path, data, row = write_queue.get(timeout=1.0)
-            cv2.imwrite(str(img_path), data)
+            if item is None:
+                return
+            img_path, data, row = item
+            if not cv2.imwrite(str(img_path), data):
+                print(f"\n[WARN] Image impossible à écrire : {img_path}")
+                continue
             with record_lock:
                 csv_writer.writerow(row)
                 csv_file_handle.flush()
-        except Empty:
-            continue
+        except Exception as exc:
+            print(f"\n[WARN] Écriture du dataset impossible : {exc}")
+        finally:
+            write_queue.task_done()
 
 # ── Boucle Principale de Contrôle ─────────────────────────────────────────────
 
@@ -463,7 +470,11 @@ def main():
     prev_a  = False
     has_display = bool(os.environ.get("DISPLAY"))
 
-    threading.Thread(target=disk_writer, daemon=True).start()
+    writer_thread = threading.Thread(target=disk_writer, daemon=True)
+    writer_thread.start()
+    lidar_thread = threading.Thread(target=lidar_worker, daemon=True, name="d500-reader")
+    lidar_thread.start()
+    print(f"[LiDAR] Connexion au D500 sur {LIDAR_PORT} @ {LIDAR_BAUDRATE} bauds…")
     with vesc:
         vesc.set_servo(SERVO_CENTER)
         vesc.set_duty_cycle(0)
@@ -544,17 +555,30 @@ def main():
                     vesc.set_servo(servo_pos)
                     vesc.set_duty_cycle(duty)
 
-                    if is_recording:  # On enregistre TOUT dès que le mode REC est actif pour garder la chronologie
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                        img_name = f"line_{timestamp}.png"
-                        img_path = IMAGES_DIR / img_name
-                        row = [f"images/{img_name}", f"{servo_pos:.4f}", f"{duty:.4f}"]
-                        try:
-                            # On continue de sauvegarder l'image courante (mask)
-                            # Le Dataset PyTorch se chargera d'empiler cette image avec les deux précédentes !
-                            write_queue.put_nowait((img_path, mask.copy(), row))
-                        except Exception:
-                            pass
+                    if is_recording:
+                        with lidar_lock:
+                            lidar_snapshot = latest_lidar
+                        if (lidar_snapshot is None or
+                                time.monotonic() - lidar_snapshot[2] > LIDAR_STALE_AFTER_S):
+                            print("\n[WARN] Aucun scan LiDAR récent : image ignorée pour garder le CSV synchronisé.")
+                        else:
+                            ranges, lidar_timestamp, _received_at = lidar_snapshot
+                            timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                            image_stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                            img_name = f"line_{image_stamp}.png"
+                            img_path = IMAGES_DIR / img_name
+                            row = [
+                                timestamp,
+                                f"images/{img_name}",
+                                f"{servo_pos:.4f}",
+                                f"{duty:.4f}",
+                                lidar_timestamp,
+                                json.dumps(ranges, separators=(",", ":")),
+                            ]
+                            try:
+                                write_queue.put_nowait((img_path, mask.copy(), row))
+                            except Full:
+                                print("\n[WARN] File d'écriture pleine : image ignorée.")
 
                     # ── Rendu Visuel HUD ──────────────────────────────────────
                     src_w = mask.shape[1]
@@ -586,6 +610,11 @@ def main():
 
         except KeyboardInterrupt: pass
         finally:
+            stop_event.set()
+            write_queue.put(None)
+            write_queue.join()
+            writer_thread.join(timeout=2.0)
+            lidar_thread.join(timeout=1.0)
             with record_lock:
                 if csv_file_handle: csv_file_handle.close()
             vesc.set_duty_cycle(0)
