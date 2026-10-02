@@ -524,6 +524,7 @@ def main():
     with vesc:
         vesc.set_servo(SERVO_CENTER)
         vesc.set_duty_cycle(0)
+        print("[CAMERA] OAK-D CAM_B gauche + CAM_C droite ; les deux alimentent le masque stéréo.")
         print("\n=== SYSTEM DATA LOGGER READY ===")
         print(" -> Mode courant : 🎮 MANUEL")
         print(" -> Bouton A   : ÉCRIRE / STOPPER le Dataset [REC]")
@@ -572,9 +573,6 @@ def main():
                     pkt_right = get_frame_or_stop(q_right)
                     if pkt_right is None:
                         break
-
-                    raw_left = pkt_left.getCvFrame()
-                    raw_right = pkt_right.getCvFrame()
 
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()
