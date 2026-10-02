@@ -352,6 +352,32 @@ lidar_lock = threading.Lock()
 latest_lidar = None  # (ranges_m, timestamp_utc, received_monotonic)
 lidar_error = None
 
+
+_default_thread_excepthook = threading.excepthook
+
+
+def _thread_excepthook(args):
+    """Turn the Gamepad library's uncaught unplug error into a safe shutdown."""
+    error_text = str(args.exc_value).lower()
+    if isinstance(args.exc_value, OSError) and "gamepad" in error_text and "disconnect" in error_text:
+        print("\n[WARN] Manette déconnectée. Arrêt sécurisé du robot.")
+        stop_event.set()
+        return
+    _default_thread_excepthook(args)
+
+
+threading.excepthook = _thread_excepthook
+
+
+def get_frame_or_stop(queue):
+    """Poll DepthAI without blocking forever if another thread requests stop."""
+    while not stop_event.is_set():
+        packet = queue.tryGet()
+        if packet is not None:
+            return packet
+        time.sleep(0.005)
+    return None
+
 class MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
@@ -507,9 +533,14 @@ def main():
                         print(f"[DATASET] {'🔴 ENREGISTREMENT EN COURS...' if is_recording else '⏹️ ENREGISTREMENT STOPPÉ'}")
                     prev_a = a_now
 
-                    # Récupération synchrone des frames OAK-D
-                    pkt_left = q_left.get()
-                    pkt_right = q_right.get()
+                    # Poll au lieu d'attendre sans fin, pour que déconnexion manette/LiDAR
+                    # puisse interrompre la boucle et couper les commandes du VESC.
+                    pkt_left = get_frame_or_stop(q_left)
+                    if pkt_left is None:
+                        break
+                    pkt_right = get_frame_or_stop(q_right)
+                    if pkt_right is None:
+                        break
 
                     raw_left = pkt_left.getCvFrame()
                     raw_right = pkt_right.getCvFrame()
@@ -617,9 +648,15 @@ def main():
             lidar_thread.join(timeout=1.0)
             with record_lock:
                 if csv_file_handle: csv_file_handle.close()
-            vesc.set_duty_cycle(0)
-            vesc.set_servo(SERVO_CENTER)
-            gamepad.stopBackgroundUpdates()
+            try:
+                vesc.set_duty_cycle(0)
+                vesc.set_servo(SERVO_CENTER)
+            except Exception as exc:
+                print(f"[WARN] Impossible d'envoyer l'arrêt au VESC : {exc}")
+            try:
+                gamepad.stopBackgroundUpdates()
+            except Exception:
+                pass
             cv2.destroyAllWindows()
             gc.collect()
 
