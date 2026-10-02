@@ -106,7 +106,7 @@ AUTO_DUTY_MIN   = 0.010
 TURN_SLOWDOWN   = 0.90   
 
 # 📂 Configuration du l'Enregistrement IA
-DATASET_DIR = Path("dataset")
+DATASET_DIR = Path(__file__).resolve().parent / "dataset"
 IMAGES_DIR  = DATASET_DIR / "images"
 CSV_FILE    = DATASET_DIR / "driving_log.csv"
 CSV_HEADER  = ["timestamp", "image_path", "servo", "duty", "lidar_timestamp", "lidar"]

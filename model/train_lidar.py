@@ -2,8 +2,8 @@
 """Entraîne un modèle de pilotage par clonage comportemental à partir du LiDAR.
 
 Format CSV attendu :
-    servo,duty,lidar
-    0.52,0.12,"[0.8, 0.7, 0.6, ...]"
+    timestamp,image_path,servo,duty,lidar_timestamp,lidar
+    ...,images/frame.png,0.52,0.12,...,"[0.8, 0.7, 0.6, ...]"
 
 La colonne ``lidar`` peut aussi s'appeler ``lidar_data`` ou ``scan``. À la
 place d'un vecteur JSON, le CSV peut contenir une colonne par rayon nommée
@@ -11,9 +11,15 @@ place d'un vecteur JSON, le CSV peut contenir une colonne par rayon nommée
 
 Les trois scans successifs sont concaténés en entrée du réseau. Les distances
 sont ramenées dans [0, 1] avec --max-range (12 mètres par défaut pour le D500).
+Les colonnes image et timestamps sont conservées dans le CSV mais ne sont pas
+utilisées par ce modèle LiDAR.
+
+Exécution depuis la racine du dépôt :
+    python3 model/train_lidar.py
 """
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -21,7 +27,6 @@ import re
 import sys
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -30,6 +35,15 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_CSV = PROJECT_DIR / "scripts/dataset/driving_log.csv"
+
+# Matplotlib système peut être installé sans ses extensions natives compilées.
+# Il ne doit pas empêcher l'entraînement ; dans ce cas on exporte les pertes en CSV.
+try:
+    import matplotlib.pyplot as plt
+except Exception as exc:
+    plt = None
+    print(f"[WARNING] Matplotlib indisponible ({exc}); le graphique sera remplacé par un CSV.")
 
 
 class LidarBehavioralCloningMLP(nn.Module):
@@ -53,8 +67,8 @@ class LidarBehavioralCloningMLP(nn.Module):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--csv", type=Path, default=PROJECT_DIR / "dataset_lidar/driving_log.csv",
-                        help="CSV du dataset (défaut : dataset_lidar/driving_log.csv)")
+    parser.add_argument("--csv", type=Path, default=DEFAULT_CSV,
+                        help="CSV caméra + LiDAR produit par scripts/Behavioral_Cloning.py")
     parser.add_argument("--scan-column", default=None,
                         help="Colonne contenant le vecteur JSON (auto-détection par défaut)")
     parser.add_argument("--max-range", type=float, default=12.0,
@@ -62,8 +76,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
-    parser.add_argument("--model-out", type=Path, default=Path("lidar_model.pth"))
-    parser.add_argument("--loss-plot-out", type=Path, default=Path("lidar_loss_plot.png"))
+    parser.add_argument("--model-out", type=Path, default=PROJECT_DIR / "model/lidar_model.pth")
+    parser.add_argument("--loss-plot-out", type=Path, default=PROJECT_DIR / "model/lidar_loss_plot.png")
     return parser.parse_args()
 
 
@@ -251,17 +265,28 @@ def main():
                 break
 
     args.loss_plot_out.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label="Train Loss")
-    plt.plot(val_losses, label="Val Loss")
-    plt.xlabel("Epochs")
-    plt.ylabel("MSE Loss")
-    plt.legend()
-    plt.title("Évolution de la perte — LiDAR")
-    plt.savefig(args.loss_plot_out)
+    if plt is not None:
+        plt.figure(figsize=(10, 5))
+        plt.plot(train_losses, label="Train Loss")
+        plt.plot(val_losses, label="Val Loss")
+        plt.xlabel("Epochs")
+        plt.ylabel("MSE Loss")
+        plt.legend()
+        plt.title("Évolution de la perte — LiDAR")
+        plt.savefig(args.loss_plot_out)
+        print(f"[OK] Courbe : {args.loss_plot_out}")
+    else:
+        loss_csv = args.loss_plot_out.with_suffix(".csv")
+        with loss_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["epoch", "train_mse", "validation_mse"])
+            writer.writerows(
+                (epoch, train_loss, val_loss)
+                for epoch, (train_loss, val_loss) in enumerate(zip(train_losses, val_losses), start=1)
+            )
+        print(f"[OK] Historique des pertes (Matplotlib indisponible) : {loss_csv}")
     print(f"\n[OK] Meilleure Val Loss : {best_val_loss:.6f}")
     print(f"[OK] Modèle : {args.model_out}")
-    print(f"[OK] Courbe : {args.loss_plot_out}")
     return 0
 
 
