@@ -76,9 +76,31 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
+                        help="Périphérique d'entraînement (auto bascule sur CPU si CUDA est indisponible)")
     parser.add_argument("--model-out", type=Path, default=PROJECT_DIR / "model/lidar_model.pth")
     parser.add_argument("--loss-plot-out", type=Path, default=PROJECT_DIR / "model/lidar_loss_plot.png")
     return parser.parse_args()
+
+
+def select_device(preference: str) -> torch.device:
+    if preference == "cpu":
+        return torch.device("cpu")
+    if not torch.cuda.is_available():
+        if preference == "cuda":
+            raise RuntimeError("CUDA demandé, mais PyTorch ne détecte aucun GPU CUDA disponible.")
+        print("[WARNING] CUDA indisponible; entraînement sur CPU.")
+        return torch.device("cpu")
+    try:
+        # is_available() ne garantit pas qu'une allocation fonctionne (GPU occupé, driver, etc.).
+        torch.empty(1, device="cuda")
+        torch.cuda.synchronize()
+        return torch.device("cuda")
+    except Exception as exc:
+        if preference == "cuda":
+            raise RuntimeError(f"CUDA demandé mais inutilisable : {exc}") from exc
+        print(f"[WARNING] CUDA détecté mais inutilisable ({exc}); entraînement sur CPU.")
+        return torch.device("cpu")
 
 
 def find_scan_columns(headers: list[str], requested: str | None) -> tuple[str | None, list[str]]:
@@ -197,7 +219,11 @@ def main():
         print("[ERROR] --max-range doit être supérieur à zéro.")
         return 1
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        device = select_device(args.device)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
     print(f"[INFO] Entraînement LiDAR sur : {device}")
     if device.type == "cuda":
         print(f"[GPU] {torch.cuda.get_device_name(0)}")
@@ -223,13 +249,23 @@ def main():
     train_ds = LidarDataset(scans[:split_index], servos[:split_index], args.max_range)
     val_ds = LidarDataset(scans[split_index:], servos[split_index:], args.max_range)
     workers = 0 if os.name == "nt" else 4
-    pin_memory = device.type == "cuda"
+    # Chaque échantillon LiDAR est petit ; le pinning ajoute du coût sans gain utile ici.
+    pin_memory = False
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                               num_workers=workers, pin_memory=pin_memory)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                             num_workers=workers, pin_memory=pin_memory)
 
-    model = LidarBehavioralCloningMLP(input_size=ray_count * 3).to(device)
+    model = LidarBehavioralCloningMLP(input_size=ray_count * 3)
+    try:
+        model = model.to(device)
+    except Exception as exc:
+        if device.type != "cuda" or args.device == "cuda":
+            print(f"[ERROR] Impossible de déplacer le modèle sur {device}: {exc}")
+            return 1
+        print(f"[WARNING] CUDA est devenu indisponible ({exc}); reprise sur CPU.")
+        device = torch.device("cpu")
+        model = LidarBehavioralCloningMLP(input_size=ray_count * 3)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(

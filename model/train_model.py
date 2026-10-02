@@ -33,7 +33,7 @@ from vision_preprocess import resize_for_model
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-DATASET_DIR = Path("dataset")
+DATASET_DIR = Path("../scripts/dataset")
 CSV_FILE = DATASET_DIR / "driving_log.csv"
 
 BATCH_SIZE = 32

@@ -40,7 +40,7 @@ VESC_TIMEOUT = 1.0
 
 SERVO_CENTER = 0.5
 AUTO_DUTY = 0.045
-MODEL_PATH = "../model/pilot_model.pth"
+MODEL_PATH = "../model/lidar_model.pth"
 
 GAMEPAD_TYPE = Gamepad.Xbox360
 

@@ -213,3 +213,4 @@ __marimo__/
 .cargo/
 lidarcontrol/data/
 lidarcontrol/maps/
+scripts/dataset/
