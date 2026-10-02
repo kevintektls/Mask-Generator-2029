@@ -48,6 +48,7 @@ AXIS_FORWARD = "RT"
 AXIS_BACKWARD = "LT"
 AXIS_STEERING = "LEFT-X"
 DEADZONE = 0.08
+THROTTLE_DEADZONE = 0.01
 
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
@@ -187,11 +188,11 @@ def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def apply_deadzone(value: float) -> float:
-    if abs(value) < DEADZONE:
+def apply_deadzone(value: float, deadzone: float = DEADZONE) -> float:
+    if abs(value) < deadzone:
         return 0.0
     sign = 1.0 if value > 0 else -1.0
-    return sign * (abs(value) - DEADZONE) / (1.0 - DEADZONE)
+    return sign * (abs(value) - deadzone) / (1.0 - deadzone)
 
 
 def connect_vesc():
@@ -326,7 +327,9 @@ class RemoteControl:
             throttle = (self.rt - self.lt) / 255.0 if armed else 0.0
             steering = self.lx / 32767.0 if armed else 0.0
             recording = self.recording
-        duty = apply_deadzone(clamp(throttle, -1.0, 1.0)) * MAX_DUTY_CYCLE
+        duty = apply_deadzone(
+            clamp(throttle, -1.0, 1.0), THROTTLE_DEADZONE
+        ) * MAX_DUTY_CYCLE
         servo = clamp(SERVO_CENTER + apply_deadzone(steering) * SERVO_RANGE, 0.0, 1.0)
         return duty, servo, recording
 
@@ -544,7 +547,7 @@ def main() -> int:
                         throttle = clamp(
                             gamepad.axis(AXIS_FORWARD) - gamepad.axis(AXIS_BACKWARD), -1.0, 1.0
                         )
-                        duty = apply_deadzone(throttle) * MAX_DUTY_CYCLE
+                        duty = apply_deadzone(throttle, THROTTLE_DEADZONE) * MAX_DUTY_CYCLE
                         steering = apply_deadzone(gamepad.axis(AXIS_STEERING))
                         servo = clamp(SERVO_CENTER + steering * SERVO_RANGE, 0.0, 1.0)
                         vesc.set_duty_cycle(duty)
