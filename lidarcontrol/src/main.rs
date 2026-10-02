@@ -369,18 +369,36 @@ fn main() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+fn trigger_axis_to_pressure(axis_value: f32) -> f32 {
+    ((axis_value + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+#[cfg(target_os = "macos")]
 fn remote_trigger_value(gamepad: &gilrs::Gamepad, button: Button, axis: Axis) -> f32 {
-    let value = if let Some(data) = gamepad.button_data(button) {
+    let value = if let Some(data) = gamepad.axis_data(axis) {
+        // Prefer the analog axis when macOS exposes the trigger both ways.
+        trigger_axis_to_pressure(data.value())
+    } else if let Some(data) = gamepad.button_data(button) {
         data.value()
     } else {
-        let axis_value = gamepad.value(axis);
-        if axis_value < 0.0 {
-            (axis_value + 1.0) * 0.5
-        } else {
-            axis_value
-        }
+        // gilrs normalizes axes to [-1, 1]; triggers span that entire range.
+        trigger_axis_to_pressure(gamepad.value(axis))
     };
     value.clamp(0.0, 1.0)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod remote_trigger_tests {
+    use super::trigger_axis_to_pressure;
+
+    #[test]
+    fn trigger_axis_maps_full_travel_continuously_to_pressure() {
+        assert_eq!(trigger_axis_to_pressure(-1.0), 0.0);
+        assert_eq!(trigger_axis_to_pressure(-0.5), 0.25);
+        assert_eq!(trigger_axis_to_pressure(0.0), 0.5);
+        assert_eq!(trigger_axis_to_pressure(0.5), 0.75);
+        assert_eq!(trigger_axis_to_pressure(1.0), 1.0);
+    }
 }
 
 #[cfg(target_os = "macos")]
