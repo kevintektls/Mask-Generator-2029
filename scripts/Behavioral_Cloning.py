@@ -378,6 +378,19 @@ def get_frame_or_stop(queue):
         time.sleep(0.005)
     return None
 
+
+def watch_gamepad_connection(gamepad):
+    """Request a safe exit if Gamepad reports that its device disappeared."""
+    while not stop_event.wait(0.2):
+        try:
+            connected = gamepad.isConnected()
+        except Exception:
+            connected = False
+        if not connected:
+            print("\n[WARN] Manette déconnectée. Arrêt sécurisé du robot.")
+            stop_event.set()
+            return
+
 class MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):
@@ -485,6 +498,12 @@ def main():
         while not Gamepad.available(): time.sleep(0.5)
     gamepad = GAMEPAD_TYPE()
     gamepad.startBackgroundUpdates()
+    threading.Thread(
+        target=watch_gamepad_connection,
+        args=(gamepad,),
+        daemon=True,
+        name="gamepad-watchdog",
+    ).start()
 
     init_dataset()
     vesc = vesc_connect()
@@ -494,6 +513,7 @@ def main():
     autonomous_mode = False  
     prev_lb = False
     prev_a  = False
+    lb_pressed_since = None
     has_display = bool(os.environ.get("DISPLAY"))
 
     writer_thread = threading.Thread(target=disk_writer, daemon=True)
@@ -507,7 +527,8 @@ def main():
         print("\n=== SYSTEM DATA LOGGER READY ===")
         print(" -> Mode courant : 🎮 MANUEL")
         print(" -> Bouton A   : ÉCRIRE / STOPPER le Dataset [REC]")
-        print(" -> Bouton LB  : Basculer en mode autonome classique géométrique\n")
+        print(" -> Appui bref LB : basculer en mode autonome géométrique")
+        print(" -> Maintenir LB 2 s : arrêter le programme\n")
         
         try:
             with dai.Device(pipeline) as device:
@@ -518,6 +539,16 @@ def main():
                 while not stop_event.is_set() and gamepad.isConnected():
                     lb_now = gamepad.isPressed("LB")
                     a_now  = gamepad.isPressed("A")
+
+                    if lb_now:
+                        if lb_pressed_since is None:
+                            lb_pressed_since = time.monotonic()
+                        elif time.monotonic() - lb_pressed_since >= 2.0:
+                            print("\n[STOP] LB maintenu 2 s : arrêt du programme.")
+                            stop_event.set()
+                            break
+                    else:
+                        lb_pressed_since = None
                     
                     if lb_now and not prev_lb:
                         autonomous_mode = not autonomous_mode
