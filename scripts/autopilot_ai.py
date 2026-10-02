@@ -1,244 +1,213 @@
 #!/usr/bin/env python3
-"""
-Robot Car — Autopilot IA Behavioral Cloning
-Plateforme : Jetson Nano 4Go + OAK-D Lite + VESC
-
-IMPORTANT :
-Ce fichier utilise le même prétraitement stéréo que le dataset.
-"""
+"""Autopilot behavioral cloning caméra + LiDAR (checkpoint de train_lidar.py)."""
 
 from __future__ import annotations
 
-import os
 import sys
+import threading
 import time
-import gc
+from collections import deque
+from pathlib import Path
 
 import cv2
+import depthai as dai
 import numpy as np
 import torch
-import depthai as dai
 from pyvesc import VESC
 
-sys.path.insert(0, "/home/robotcar/Gamepad")
-import Gamepad
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
+sys.path.insert(0, str(SCRIPT_DIR))
+from vision_preprocess import make_mask_stereo, resize_for_model
+from Behavioral_Cloning_Lidar import D500Reader, LIDAR_PORT, LIDAR_MAX_RANGE_M
+from model.camera_lidar_model import CameraLidarBehavioralCloning
 
-from model_def import BehavioralCloningCNN
-from vision_preprocess import make_mask_stereo, resize_for_model, CROP_TOP_RATIO
-from collections import deque
-
-
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-
-DISPLAY_W = 640
-DISPLAY_H = 480
-CAM_FPS = 30
-
+MODEL_PATH = PROJECT_DIR / "model" / "camera_lidar_model.pth"
 VESC_PORT = "/dev/ttyACM0"
 VESC_BAUDRATE = 115200
 VESC_TIMEOUT = 1.0
-
 SERVO_CENTER = 0.5
 AUTO_DUTY = 0.045
-MODEL_PATH = "../model/lidar_model.pth"
+CAM_FPS = 30
+LIDAR_STALE_AFTER_S = 0.5
+GAMEPAD_TYPE = None
+try:
+    sys.path.insert(0, "/home/robotcar/Gamepad")
+    import Gamepad
+    GAMEPAD_TYPE = Gamepad.Xbox360
+except ImportError:
+    Gamepad = None
 
-GAMEPAD_TYPE = Gamepad.Xbox360
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
 
 
-# ── OUTILS ────────────────────────────────────────────────────────────────────
-
-def clamp(value: float, min_val: float, max_val: float) -> float:
-    return max(min_val, min(max_val, value))
-
-
-def build_pipeline() -> dai.Pipeline:
+def build_pipeline():
     pipeline = dai.Pipeline()
-
-    cam_left = pipeline.create(dai.node.MonoCamera)
-    cam_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    cam_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-    cam_left.setFps(CAM_FPS)
-
-    xout_left = pipeline.create(dai.node.XLinkOut)
-    xout_left.setStreamName("left")
-    xout_left.input.setBlocking(False)
-    xout_left.input.setQueueSize(2)
-    cam_left.out.link(xout_left.input)
-
-    cam_right = pipeline.create(dai.node.MonoCamera)
-    cam_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-    cam_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-    cam_right.setFps(CAM_FPS)
-
-    xout_right = pipeline.create(dai.node.XLinkOut)
-    xout_right.setStreamName("right")
-    xout_right.input.setBlocking(False)
-    xout_right.input.setQueueSize(2)
-    cam_right.out.link(xout_right.input)
-
+    for socket, stream in ((dai.CameraBoardSocket.CAM_B, "left"),
+                           (dai.CameraBoardSocket.CAM_C, "right")):
+        camera = pipeline.create(dai.node.MonoCamera)
+        camera.setBoardSocket(socket)
+        camera.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
+        camera.setFps(CAM_FPS)
+        output = pipeline.create(dai.node.XLinkOut)
+        output.setStreamName(stream)
+        output.input.setBlocking(False)
+        output.input.setQueueSize(2)
+        camera.out.link(output.input)
     return pipeline
 
 
-def load_model(device: torch.device) -> BehavioralCloningCNN:
-    model = BehavioralCloningCNN().to(device)
-
-    if not os.path.exists(MODEL_PATH):
-        print(f"[ERROR] Modèle introuvable : {MODEL_PATH}")
-        sys.exit(1)
-
+def load_model(device):
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(f"Modèle caméra + LiDAR introuvable : {MODEL_PATH}. Entraîne-le avec model/train_lidar.py.")
     try:
-        state = torch.load(MODEL_PATH, map_location=device, weights_only=True)
+        checkpoint = torch.load(str(MODEL_PATH), map_location=device, weights_only=True)
     except TypeError:
-        # Compatibilité anciennes versions PyTorch
-        state = torch.load(MODEL_PATH, map_location=device)
-
-    model.load_state_dict(state)
+        checkpoint = torch.load(str(MODEL_PATH), map_location=device)
+    if not isinstance(checkpoint, dict) or checkpoint.get("model_type") != "camera_lidar":
+        raise ValueError(f"{MODEL_PATH} n'est pas un checkpoint caméra + LiDAR. Le modèle LiDAR seul ne convient pas.")
+    ray_count = int(checkpoint.get("ray_count", 0))
+    history_scans = int(checkpoint.get("history_scans", 0))
+    history_images = int(checkpoint.get("history_images", 0))
+    max_range = float(checkpoint.get("max_range", 0))
+    if ray_count != 180 or history_scans != 3 or history_images != 3 or max_range <= 0:
+        raise ValueError("Métadonnées caméra/LiDAR absentes ou incompatibles dans le checkpoint.")
+    model = CameraLidarBehavioralCloning(ray_count, history_scans).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    return model, ray_count, history_scans, max_range
 
-    return model
+
+def lidar_worker(reader, state, lock, stop_event):
+    while not stop_event.is_set():
+        try:
+            scan = reader.read_scan()
+            with lock:
+                state["scan"] = scan
+                state["time"] = time.monotonic()
+                state["error"] = None
+        except Exception as exc:
+            with lock:
+                state["error"] = str(exc)
+            if not stop_event.is_set():
+                time.sleep(0.1)
 
 
 def emergency_stop(vesc):
     try:
-        vesc.set_duty_cycle(0)
+        vesc.set_duty_cycle(0.0)
         vesc.set_servo(SERVO_CENTER)
-        time.sleep(0.05)
-        vesc.set_duty_cycle(0)
-    except Exception as e:
-        print(f"[ERROR] Emergency stop failed: {e}")
+    except Exception as exc:
+        print(f"[ERROR] Arrêt VESC impossible : {exc}")
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
 
-def main():
-    print("[INFO] Initialisation autopilot IA...")
+def main() -> int:
+    print("[INFO] Initialisation autopilot caméra + LiDAR...")
+    device = torch.device("cpu")
+    torch.set_num_threads(2)
+    print("[INFO] Inférence sur : cpu (2 threads)")
+    try:
+        model, ray_count, history_size, max_range = load_model(device)
+    except Exception as exc:
+        print(f"[ERROR] Chargement du modèle : {exc}")
+        return 1
+    print(f"[INFO] Modèle fusionné chargé : caméra stéréo + {ray_count} rayons LiDAR × {history_size}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[INFO] Inférence sur : {device}")
-
-    if device.type == "cpu":
-        torch.set_num_threads(2)
-        print("[OPTIMISATION] PyTorch limité à 2 threads CPU.")
-
-    model = load_model(device)
-    print("[INFO] Modèle chargé.")
-
-    if Gamepad.available():
+    gamepad = None
+    if Gamepad is not None and Gamepad.available():
         gamepad = GAMEPAD_TYPE()
         gamepad.startBackgroundUpdates()
-        print("[INFO] Manette connectée. LB = arrêt urgence.")
+        print("[INFO] Manette connectée ; LB ou déconnexion = arrêt.")
     else:
-        gamepad = None
-        print("[WARNING] Aucune manette détectée.")
+        print("[WARNING] Aucune manette détectée ; Ctrl+C reste disponible pour arrêter.")
 
     try:
         vesc = VESC(serial_port=VESC_PORT, baudrate=VESC_BAUDRATE, timeout=VESC_TIMEOUT)
-        print("[INFO] VESC connecté.")
-    except Exception as e:
-        print(f"[ERROR] VESC impossible à joindre : {e}")
-        sys.exit(1)
+        lidar = D500Reader(LIDAR_PORT)
+    except Exception as exc:
+        if gamepad:
+            gamepad.stopBackgroundUpdates()
+        print(f"[ERROR] Connexion matériel impossible : {exc}")
+        return 1
 
-    pipeline = build_pipeline()
-    has_display = bool(os.environ.get("DISPLAY"))
+    lidar_state = {"scan": None, "time": 0.0, "error": None}
+    lidar_lock = threading.Lock()
+    stop_event = threading.Event()
+    scan_thread = threading.Thread(target=lidar_worker, args=(lidar, lidar_state, lidar_lock, stop_event), daemon=True)
+    scan_thread.start()
+    image_history = deque(maxlen=history_size)
+    scan_history = deque(maxlen=history_size)
 
-    print("\n=== AUTOPILOTE IA PRÊT ===")
-    print("LB ou CTRL+C = arrêt immédiat\n")
-
-    with vesc:
-        vesc.set_servo(SERVO_CENTER)
-        vesc.set_duty_cycle(0)
-        time.sleep(1.0)
-
-        try:
-            frame_buffer = deque(maxlen=3)
-            with dai.Device(pipeline) as device_dai:
-                q_left = device_dai.getOutputQueue(name="left", maxSize=2, blocking=False)
-                q_right = device_dai.getOutputQueue(name="right", maxSize=2, blocking=False)
-
-                while True:
-                    if gamepad and gamepad.isConnected() and gamepad.isPressed("LB"):
-                        print("[URGENCE] LB pressé. Coupure immédiate.")
-                        emergency_stop(vesc)
-                        break
-                
-                    pkt_left = q_left.tryGet()
-                    pkt_right = q_right.tryGet()
-
-                    if pkt_left is None or pkt_right is None:
-                        time.sleep(0.002)
-                        continue
-
-                    raw_left = pkt_left.getCvFrame()
-                    raw_right = pkt_right.getCvFrame()
-
-                    mask = make_mask_stereo(raw_left, raw_right)
-                    mask_resized = resize_for_model(mask)
-
-                    # ── AJOUT : Gestion de la file d'attente temporelle en direct ──
-                    if len(frame_buffer) == 0:
-                        for _ in range(3):
-                            frame_buffer.append(mask_resized.copy())
-                    else:
-                        frame_buffer.append(mask_resized.copy())
-
-                    # On convertit le buffer (3 masques) en un array numpy de dimension (3, H, W)
-                    stacked_input = np.stack(list(frame_buffer), axis=0)
-
-                    # Transformation pour PyTorch : ajout de la dimension Batch -> (1, 3, H, W)
-                    img_tensor = (
-                        torch.from_numpy(stacked_input)
-                        .float()
-                        .unsqueeze(0) 
-                        / 255.0
-                    ).to(device)
-
-                    with torch.no_grad():
-                        prediction = model(img_tensor).item()
-
-                    servo_pos = clamp(prediction, 0.0, 1.0)
-
-                    vesc.set_servo(servo_pos)
-                    vesc.set_duty_cycle(AUTO_DUTY)
-
-                    if has_display:
-                        display = cv2.resize(mask, (DISPLAY_W, DISPLAY_H))
-                        display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-
-                        cv2.line(
-                            display,
-                            (0, int(DISPLAY_H * CROP_TOP_RATIO)),
-                            (DISPLAY_W, int(DISPLAY_H * CROP_TOP_RATIO)),
-                            (0, 0, 150),
-                            1,
-                        )
-
-                        text = f"IA | Servo: {servo_pos:.3f} | Duty: {AUTO_DUTY:.3f}"
-                        cv2.putText(
-                            display,
-                            text,
-                            (10, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (0, 255, 0),
-                            2,
-                        )
-
-                        cv2.imshow("IA Autopilot Mask", display)
-
-                        if cv2.waitKey(1) & 0xFF == ord("q"):
+    try:
+        with vesc:
+            vesc.set_servo(SERVO_CENTER)
+            vesc.set_duty_cycle(0.0)
+            try:
+                with dai.Device(build_pipeline()) as camera:
+                    q_left = camera.getOutputQueue(name="left", maxSize=2, blocking=False)
+                    q_right = camera.getOutputQueue(name="right", maxSize=2, blocking=False)
+                    print("[INFO] Caméras OAK-D et D500 actifs. LB ou Ctrl+C arrête la voiture.")
+                    while True:
+                        if gamepad and (not gamepad.isConnected() or gamepad.isPressed("LB")):
+                            print("\n[STOP] Arrêt demandé par la manette.")
                             break
+                        packet_left, packet_right = q_left.tryGet(), q_right.tryGet()
+                        if packet_left is None or packet_right is None:
+                            with lidar_lock:
+                                fresh = lidar_state["scan"] is not None and time.monotonic() - lidar_state["time"] <= LIDAR_STALE_AFTER_S
+                            if not fresh:
+                                emergency_stop(vesc)
+                            time.sleep(0.005)
+                            continue
 
-        except KeyboardInterrupt:
-            print("\n[INFO] Interruption clavier.")
-        finally:
-            print("[INFO] Arrêt véhicule...")
-            emergency_stop(vesc)
+                        with lidar_lock:
+                            raw_scan = lidar_state["scan"]
+                            scan_age = time.monotonic() - lidar_state["time"] if raw_scan is not None else float("inf")
+                            lidar_error = lidar_state["error"]
+                        if raw_scan is None or scan_age > LIDAR_STALE_AFTER_S:
+                            emergency_stop(vesc)
+                            if lidar_error:
+                                print(f"\r[WARNING] Scan LiDAR indisponible : {lidar_error}   ", end="", flush=True)
+                            continue
 
-            if gamepad:
-                gamepad.stopBackgroundUpdates()
-
-            cv2.destroyAllWindows()
-            gc.collect()
+                        mask = make_mask_stereo(packet_left.getCvFrame(), packet_right.getCvFrame())
+                        image_history.append(resize_for_model(mask).astype(np.float32) / 255.0)
+                        normalized_scan = np.nan_to_num(np.asarray(raw_scan, dtype=np.float32), nan=max_range, posinf=max_range, neginf=0.0)
+                        if normalized_scan.size != ray_count:
+                            emergency_stop(vesc)
+                            raise ValueError(f"Scan reçu avec {normalized_scan.size} rayons au lieu de {ray_count}.")
+                        normalized_scan = np.clip(normalized_scan, 0.0, max_range) / max_range
+                        scan_history.append(normalized_scan)
+                        while len(image_history) < history_size:
+                            image_history.appendleft(image_history[0])
+                        while len(scan_history) < history_size:
+                            scan_history.appendleft(scan_history[0])
+                        images = torch.from_numpy(np.stack(image_history)).unsqueeze(0).to(device)
+                        scans = torch.from_numpy(np.stack(scan_history).reshape(1, -1)).to(device)
+                        with torch.no_grad():
+                            servo = clamp(float(model(images, scans).item()), 0.0, 1.0)
+                        vesc.set_servo(servo)
+                        vesc.set_duty_cycle(AUTO_DUTY)
+                        print(f"\rservo={servo:.3f} duty={AUTO_DUTY:.3f} lidar={scan_age * 1000:.0f} ms   ", end="", flush=True)
+            except KeyboardInterrupt:
+                print("\n[INFO] Interruption clavier.")
+            finally:
+                print("\n[INFO] Arrêt du véhicule...")
+                emergency_stop(vesc)
+    except Exception as exc:
+        print(f"\n[ERROR] Autopilot caméra + LiDAR : {exc}")
+        emergency_stop(vesc)
+        return 1
+    finally:
+        stop_event.set()
+        lidar.close()
+        if gamepad:
+            gamepad.stopBackgroundUpdates()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
