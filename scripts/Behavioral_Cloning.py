@@ -11,8 +11,9 @@ import sys
 import time
 import gc
 import csv
+import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue, Empty
@@ -31,6 +32,12 @@ try:
     from pyvesc import VESC
 except ImportError:
     print("pyvesc not installed.  Run:  pip install pyvesc")
+    sys.exit(1)
+
+try:
+    import serial
+except ImportError:
+    print("pyserial not installed. Run: pip install pyserial")
     sys.exit(1)
 
 try:
@@ -76,6 +83,14 @@ VESC_TIMEOUT         = 1.0
 VESC_CONNECT_RETRIES = 8
 VESC_CONNECT_SETTLE  = 1.0
 
+# LiDAR LDROBOT D500 / STL-19P
+LIDAR_PORT = "/dev/ttyTHS1"
+LIDAR_BAUDRATE = 230400
+LIDAR_MAX_RANGE_M = 12.0
+LIDAR_BINS = 180
+LIDAR_STALE_AFTER_S = 0.5
+LIDAR_PACKET_SIZE = 47
+
 # 🎮 Mapping Manette Logitech F710 (Mode X)
 GAMEPAD_TYPE   = Gamepad.Xbox360
 AXIS_FORWARD   = "RT"
@@ -94,6 +109,7 @@ TURN_SLOWDOWN   = 0.90
 DATASET_DIR = Path("dataset")
 IMAGES_DIR  = DATASET_DIR / "images"
 CSV_FILE    = DATASET_DIR / "driving_log.csv"
+CSV_HEADER  = ["timestamp", "image_path", "servo", "duty", "lidar_timestamp", "lidar"]
 
 
 # ── Variables d'état globales ──────────────────────────────────────────────────
@@ -114,6 +130,120 @@ def apply_deadzone(value: float) -> float:
         return 0.0
     sign = 1.0 if value > 0 else -1.0
     return sign * (abs(value) - DEADZONE) / (1.0 - DEADZONE)
+
+
+def lidar_crc8(data: bytes) -> int:
+    """CRC-8 LDROBOT utilisé par les paquets STL-19P."""
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (((crc << 1) ^ 0x4D) if crc & 0x80 else (crc << 1)) & 0xFF
+    return crc
+
+
+class D500Reader:
+    """Lit des scans avant de 180 bins, de -90° à +90°, en mètres."""
+
+    def __init__(self, port: str):
+        self.serial = serial.Serial(
+            port=port,
+            baudrate=LIDAR_BAUDRATE,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.2,
+        )
+        self.buffer = bytearray()
+        self.points = deque()
+        self.pending_point = None
+
+    def close(self):
+        self.serial.close()
+
+    def _read_packet(self) -> bytes:
+        while not stop_event.is_set():
+            waiting = self.serial.in_waiting
+            chunk = self.serial.read(waiting if waiting else 1)
+            if chunk:
+                self.buffer.extend(chunk)
+            while self.buffer:
+                if self.buffer[0] != 0x54:
+                    del self.buffer[0]
+                    continue
+                if len(self.buffer) < 2:
+                    break
+                if self.buffer[1] != 0x2C:
+                    del self.buffer[0]
+                    continue
+                if len(self.buffer) < LIDAR_PACKET_SIZE:
+                    break
+                packet = bytes(self.buffer[:LIDAR_PACKET_SIZE])
+                if lidar_crc8(packet[:-1]) != packet[-1]:
+                    del self.buffer[0]
+                    continue
+                del self.buffer[:LIDAR_PACKET_SIZE]
+                return packet
+        raise RuntimeError("Arrêt demandé pendant la lecture du LiDAR.")
+
+    @staticmethod
+    def _decode_points(packet: bytes):
+        start = int.from_bytes(packet[4:6], "little") / 100.0
+        end = int.from_bytes(packet[42:44], "little") / 100.0
+        delta = (end - start) % 360.0
+        for i in range(12):
+            offset = 6 + i * 3
+            distance_m = int.from_bytes(packet[offset:offset + 2], "little") / 1000.0
+            angle = (start + delta * i / 11.0) % 360.0
+            yield angle, distance_m
+
+    def _next_point(self):
+        while not self.points:
+            self.points.extend(self._decode_points(self._read_packet()))
+        return self.points.popleft()
+
+    def read_scan(self) -> list[float]:
+        ranges = [LIDAR_MAX_RANGE_M] * LIDAR_BINS
+        last_angle = None
+        point_count = 0
+        while not stop_event.is_set():
+            angle, distance_m = self.pending_point or self._next_point()
+            self.pending_point = None
+            if last_angle is not None and angle < last_angle - 180.0:
+                if point_count >= 100:
+                    self.pending_point = (angle, distance_m)
+                    return ranges
+                ranges = [LIDAR_MAX_RANGE_M] * LIDAR_BINS
+                point_count = 0
+
+            signed_angle = angle if angle <= 180.0 else angle - 360.0
+            if -90.0 <= signed_angle <= 90.0 and 0.0 < distance_m <= LIDAR_MAX_RANGE_M:
+                index = min(LIDAR_BINS - 1, int(signed_angle + 90.0))
+                ranges[index] = min(ranges[index], distance_m)
+                point_count += 1
+            last_angle = angle
+        raise RuntimeError("Arrêt demandé pendant la lecture du LiDAR.")
+
+
+def lidar_worker():
+    global latest_lidar, lidar_error
+    reader = None
+    try:
+        reader = D500Reader(LIDAR_PORT)
+        print(f"[LiDAR] D500 connecté sur {LIDAR_PORT} @ {LIDAR_BAUDRATE}")
+        while not stop_event.is_set():
+            ranges = reader.read_scan()
+            stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            with lidar_lock:
+                latest_lidar = (ranges, stamp, time.monotonic())
+    except Exception as exc:
+        if not stop_event.is_set():
+            lidar_error = str(exc)
+            print(f"[LiDAR] Erreur : {exc}")
+            stop_event.set()
+    finally:
+        if reader is not None:
+            reader.close()
 
 
 # ── Vision Stéréo Ultra-Binaire Nettoyée ──────────────────────────────────────
@@ -196,13 +326,21 @@ def compute_steering(mask: np.ndarray):
 def init_dataset():
     global csv_writer, csv_file_handle
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    file_exists = CSV_FILE.exists()
+    file_exists = CSV_FILE.exists() and CSV_FILE.stat().st_size > 0
+    if file_exists:
+        with CSV_FILE.open("r", newline="", encoding="utf-8") as existing:
+            header = next(csv.reader(existing), [])
+        if header != CSV_HEADER:
+            raise ValueError(
+                f"Le CSV {CSV_FILE} a un ancien format. Renomme-le ou déplace-le "
+                "avant de commencer un dataset avec LiDAR."
+            )
     
     csv_file_handle = open(CSV_FILE, mode="a", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file_handle)
     
     if not file_exists:
-        csv_writer.writerow(["image_path", "servo", "duty"])
+        csv_writer.writerow(CSV_HEADER)
         csv_file_handle.flush()
 
 
@@ -210,6 +348,9 @@ def init_dataset():
 latest_frame: np.ndarray | None = None
 frame_lock = threading.Lock()
 stop_event = threading.Event()
+lidar_lock = threading.Lock()
+latest_lidar = None  # (ranges_m, timestamp_utc, received_monotonic)
+lidar_error = None
 
 class MJPEGHandler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
